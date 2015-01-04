@@ -74,12 +74,14 @@ typedef struct pt_pkg_t {
     char *version;
 } pt_pkg_t;
 
-void _pt_rmrf(const char *path) {
-    if(!unlink(path)) {
+void pt_rmrf(int dd, const char *path) {
+    if(!unlinkat(dd, path, 0)) {
         return;
     } else {
         struct dirent *de;
         DIR *d;
+        int fd;
+
         switch(errno) {
             case ENOENT:
                 return;
@@ -91,17 +93,18 @@ void _pt_rmrf(const char *path) {
                 return;
         }
 
-        d = opendir(path);
+        fd = openat(dd, path, O_DIRECTORY);
+        d = fdopendir(fd);
         if(!d) { return; }
         for(de = readdir(d); de != NULL; de = readdir(d)) {
             if(strcmp(de->d_name, "..") != 0 && strcmp(de->d_name, ".") != 0) {
                 char name[PATH_MAX];
                 snprintf(name, PATH_MAX, "%s/%s", path, de->d_name);
-                _pt_rmrf(name);
+                pt_rmrf(dd, name);
             }
         }
         closedir(d);
-        rmdir(path);
+        unlinkat(dd, path, AT_REMOVEDIR);
     }
 }
 
@@ -275,7 +278,7 @@ void _pt_pkg_free(pt_pkg_t *pkg) {
 void pt_cleanup(pt_env_t *pt) {
     if(pt != NULL) { 
         close(pt->rootfd);
-        _pt_rmrf(pt->root);
+        pt_rmrf(AT_FDCWD, pt->root);
         free(pt->root);
         free(pt->dbpath);
         alpm_release(pt->handle);
