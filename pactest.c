@@ -113,6 +113,7 @@ int pt_mkdir(int dd, int mode, const char *path) {
     char p[PATH_MAX] = "";
     char *c;
     int ret = 0;
+    if(dir[0] == '/') { strcat(p, "/"); }
     for(c = strtok(dir, "/"); c; c = strtok(NULL, "/")) {
         struct stat buf;
         strcat(p, c);
