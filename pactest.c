@@ -74,7 +74,7 @@ typedef struct pt_pkg_t {
     char *version;
 } pt_pkg_t;
 
-void pt_rmrf(int dd, const char *path) {
+void pt_rmrfat(int dd, const char *path) {
     if(!unlinkat(dd, path, 0)) {
         return;
     } else {
@@ -100,7 +100,7 @@ void pt_rmrf(int dd, const char *path) {
             if(strcmp(de->d_name, "..") != 0 && strcmp(de->d_name, ".") != 0) {
                 char name[PATH_MAX];
                 snprintf(name, PATH_MAX, "%s/%s", path, de->d_name);
-                pt_rmrf(dd, name);
+                pt_rmrfat(dd, name);
             }
         }
         closedir(d);
@@ -108,7 +108,7 @@ void pt_rmrf(int dd, const char *path) {
     }
 }
 
-int pt_mkdir(int dd, int mode, const char *path) {
+int pt_mkdirat(int dd, int mode, const char *path) {
     char *dir = strdup(path);
     char p[PATH_MAX] = "";
     char *c;
@@ -125,7 +125,7 @@ int pt_mkdir(int dd, int mode, const char *path) {
     return ret;
 }
 
-int pt_grep(int dd, const char *path, const char *needle) {
+int pt_grepat(int dd, const char *path, const char *needle) {
     int fd;
     char buf[LINE_MAX];
     FILE *f;
@@ -138,12 +138,12 @@ int pt_grep(int dd, const char *path, const char *needle) {
     return 0;
 }
 
-int pt_spew(int dd, const char *path, const char *contents) {
+int pt_writeat(int dd, const char *path, const char *contents) {
     int fd, flags = O_CREAT | O_WRONLY | O_TRUNC;
     char *c;
     if((c = strrchr(path, '/'))) {
         char *dir = strndup(path, c - path);
-        pt_mkdir(dd, 0700, dir);
+        pt_mkdirat(dd, 0700, dir);
         free(dir);
     }
     if((fd = openat(dd, path, flags, 0700)) == -1) {
@@ -168,7 +168,7 @@ pt_env_t *pt_new(const char *dbpath) {
 }
 
 alpm_handle_t *pt_initialize(pt_env_t *pt, alpm_errno_t *err) {
-    pt_mkdir(pt->rootfd, 0700, pt->dbpath);
+    pt_mkdirat(pt->rootfd, 0700, pt->dbpath);
     if(err) { *err = 0; }
     pt->handle = alpm_initialize(pt->root, pt->dbpath, err);
     return pt->handle;
@@ -210,7 +210,7 @@ int pt_install_db(pt_env_t *pt, pt_db_t *db) {
     char dbpath[PATH_MAX];
     int fd;
     
-    pt_mkdir(pt->dbfd, 0700, "sync");
+    pt_mkdirat(pt->dbfd, 0700, "sync");
     sprintf(dbpath, "sync/%s.db", db->name);
     fd = openat(pt->dbfd, dbpath, O_CREAT, 0700);
 
@@ -279,7 +279,7 @@ void _pt_pkg_free(pt_pkg_t *pkg) {
 void pt_cleanup(pt_env_t *pt) {
     if(pt != NULL) { 
         close(pt->rootfd);
-        pt_rmrf(AT_FDCWD, pt->root);
+        pt_rmrfat(AT_FDCWD, pt->root);
         free(pt->root);
         free(pt->dbpath);
         alpm_release(pt->handle);
