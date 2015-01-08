@@ -32,6 +32,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <string.h>
+#include <sys/wait.h>
 
 #include <alpm.h>
 
@@ -306,6 +307,86 @@ pt_pkg_t *pt_pkg_new(pt_env_t *pt, const char *pkgname, const char *pkgver) {
     pkg->version = strdup(pkgname);
     pt->pkgs = alpm_list_add(pt->pkgs, pkg);
     return pkg;
+}
+
+int pt_fexecve(int fd, char *const argv[], char *const envp[],
+        int cwd, FILE *out, FILE *err) {
+    int opipe[2], epipe[2];
+    pid_t pid;
+    if( pipe(opipe) || pipe(epipe) ) { return -1; }
+
+#define _PT_CLOSE(fd) while(close(fd) == -1 && errno == EINTR)
+#define _PT_DUP(oldfd, newfd) while(dup2(oldfd, newfd) == -1 && errno == EINTR)
+
+    if((pid = fork()) == -1) {
+        return -1;
+    } else if(pid == 0) {
+        /* child */
+        _PT_DUP(opipe[1], STDOUT_FILENO);
+        _PT_DUP(epipe[1], STDERR_FILENO);
+        _PT_CLOSE(opipe[0]);
+        _PT_CLOSE(opipe[1]);
+        _PT_CLOSE(epipe[0]);
+        _PT_CLOSE(epipe[1]);
+
+        if(cwd >= 0 && fchdir(cwd) != 0) { return 0; }
+
+        fexecve(fd, argv, envp);
+
+        return -1;
+    } else {
+        /* parent */
+        int status, nfds = (opipe[0] > epipe[0] ? opipe[0] : epipe[0]) + 1;
+        fd_set readfds;
+        _PT_CLOSE(opipe[1]);
+        _PT_CLOSE(epipe[1]);
+
+        FD_ZERO(&readfds);
+        FD_SET(opipe[0], &readfds);
+        FD_SET(epipe[0], &readfds);
+
+        while(select(nfds, &readfds, NULL, NULL, NULL) > 0) {
+            size_t r;
+            char buf[LINE_MAX];
+
+            if(FD_ISSET(opipe[0], &readfds)) {
+                r = read(opipe[0], buf, LINE_MAX - 1);
+                if(out) { buf[r] = '\0'; fputs(buf, out); };
+            }
+            if(FD_ISSET(epipe[0], &readfds)) {
+                r = read(epipe[0], buf, LINE_MAX - 1);
+                if(out) { buf[r] = '\0'; fputs(buf, err); };
+            }
+
+            FD_SET(opipe[0], &readfds);
+            FD_SET(epipe[0], &readfds);
+
+            if(waitpid(pid, &status, WNOHANG) != 0) {
+                /* slurp any remaining input and break */
+                if(out) {
+                    while((r = read(opipe[0], buf, LINE_MAX - 1)) > 0) {
+                        buf[r] = '\0';
+                        fputs(buf, out);
+                    }
+                }
+                if(err) {
+                    while((r = read(epipe[0], buf, LINE_MAX - 1)) > 0) {
+                        buf[r] = '\0';
+                        fputs(buf, err);
+                    }
+                }
+                break;
+            }
+        }
+
+        _PT_CLOSE(opipe[0]);
+        _PT_CLOSE(epipe[0]);
+
+        return WEXITSTATUS(status);
+    }
+
+#undef _PT_CLOSE
+#undef _PT_DUP
 }
 
 #endif /* PACTEST_C */
