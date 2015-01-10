@@ -379,7 +379,7 @@ pt_db_t *pt_db_new(pt_env_t *pt, const char *dbname) {
 pt_pkg_t *pt_pkg_new(pt_env_t *pt, const char *pkgname, const char *pkgver) {
     pt_pkg_t *pkg = calloc(sizeof(pt_pkg_t), 1);
     pkg->name = strdup(pkgname);
-    pkg->version = strdup(pkgname);
+    pkg->version = strdup(pkgver);
     pt->pkgs = alpm_list_add(pt->pkgs, pkg);
     return pkg;
 }
