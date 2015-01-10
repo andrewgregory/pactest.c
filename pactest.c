@@ -121,7 +121,7 @@ int pt_mkdirat(int dd, int mode, const char *path) {
         struct stat buf;
         strcat(p, c);
         strcat(p, "/");
-        if(stat(p, &buf) == 0) { continue; }
+        if(fstatat(dd, p, &buf, 0) == 0) { continue; }
         if((ret = mkdirat(dd, p, mode)) != 0) { break; }
     }
     free(dir);
