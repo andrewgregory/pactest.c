@@ -51,6 +51,11 @@ typedef struct pt_db_t {
     alpm_list_t *pkgs;
 } pt_db_t;
 
+typedef struct pt_pkg_file_t {
+    char *path;
+    char *contents;
+} pt_pkg_file_t;
+
 typedef struct pt_pkg_t {
     alpm_list_t *backup;
     alpm_list_t *checkdepends;
@@ -255,14 +260,83 @@ int pt_install_db(pt_env_t *pt, pt_db_t *db) {
     return 0;
 }
 
-int pt_cache_pkg(pt_env_t *pt, pt_pkg_t *p) {
-    struct archive *a;
-    a = archive_write_new();
+void pt_pkg_add_file(pt_pkg_t *pkg, const char *path, const char *contents) {
+    pt_pkg_file_t *f = malloc(sizeof(pt_pkg_file_t));
+    f->path = strdup(path);
+    f->contents = strdup(contents);
+    pkg->files = alpm_list_add(pkg->files, f);
+}
+
+int _pt_dwrite_entry(int fd, const char *section, const char *value) {
+    if(value == NULL) { return 0; }
+    return dprintf(fd, "%%%s%%\n%s\n\n", section, value);
+}
+
+void _pt_dwrite_list(int fd, const char *section, alpm_list_t *values) {
+    dprintf(fd, "%%%s%%\n", section);
+    while(values) {
+        dprintf(fd, "%s\n", (char *) values->data);
+        values = values->next;
+    }
+    write(fd, "\n", 1);
+}
+
+int pt_add_pkg_to_localdb(pt_env_t *pt, pt_pkg_t *pkg) {
     alpm_list_t *i;
+    char path[PATH_MAX] = "";
+    int fd;
+
+    snprintf(path, PATH_MAX, "local/%s-%s", pkg->name, pkg->version);
+    pt_mkdirat(pt->dbfd, 0700, path);
+
+    /* TODO: write mtree file */
+
+    snprintf(path, PATH_MAX, "local/%s-%s/files", pkg->name, pkg->version);
+    fd = openat(pt->dbfd, path, O_CREAT | O_WRONLY, 0644);
+    dprintf(fd, "%%%s%%\n", "FILES");
+    for(i = pkg->files; i; i = i->next) {
+        /* TODO: fill in parent directories? */
+        pt_pkg_file_t *f = i->data;
+        dprintf(fd, "%s\n", f->path);
+    }
+    write(fd, "\n", 1);
+    dprintf(fd, "%%%s%%\n", "BACKUP");
+    for(i = pkg->backup; i; i = i->next) {
+        pt_pkg_file_t *f = i->data;
+        dprintf(fd, "%s\n", f->path);
+    }
+    write(fd, "\n", 1);
+    close(fd);
+
+    snprintf(path, PATH_MAX, "local/%s-%s/desc", pkg->name, pkg->version);
+    fd = openat(pt->dbfd, path, O_CREAT | O_WRONLY, 0644);
+    _pt_dwrite_entry(fd, "FILENAME", pkg->filename);
+    _pt_dwrite_entry(fd, "NAME", pkg->name);
+    _pt_dwrite_entry(fd, "BASE", pkg->base);
+    _pt_dwrite_entry(fd, "VERSION", pkg->version);
+    _pt_dwrite_entry(fd, "DESC", pkg->desc);
+    _pt_dwrite_entry(fd, "CSIZE", pkg->csize);
+    _pt_dwrite_entry(fd, "ISIZE", pkg->isize);
+    _pt_dwrite_list(fd, "GROUPS", pkg->groups);
+    _pt_dwrite_list(fd, "DEPENDS", pkg->depends);
+    _pt_dwrite_list(fd, "CONFLICTS", pkg->conflicts);
+    _pt_dwrite_list(fd, "PROVIDES", pkg->provides);
+    _pt_dwrite_list(fd, "OPTDEPENDS", pkg->optdepends);
+    _pt_dwrite_list(fd, "MAKEDEPENDS", pkg->makedepends);
+    _pt_dwrite_list(fd, "CHECKDEPENDS", pkg->checkdepends);
+    close(fd);
+
     return 0;
 }
 
 int pt_install_pkg(pt_env_t *pt, pt_pkg_t *pkg) {
+    alpm_list_t *i;
+    pt_add_pkg_to_localdb(pt, pkg);
+    for(i = pkg->files; i; i = i->next) {
+        pt_pkg_file_t *f = i->data;
+        pt_writeat(pt->rootfd, f->path, f->contents);
+    }
+    return 0;
 }
 
 void _pt_db_free(pt_db_t *db) {
