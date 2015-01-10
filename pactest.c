@@ -212,6 +212,52 @@ void _pt_path(pt_env_t *pt, char *dest, const char *path) {
     }
 }
 
+int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
+    alpm_list_t *i;
+    char *buf;
+    size_t buflen;
+    FILE *contents;
+    struct archive *a = archive_write_new();
+    struct archive_entry *e;
+    int fd = openat(dd, path, O_CREAT | O_WRONLY, 0644);;
+
+    archive_write_set_format_ustar(a);
+    archive_write_open_fd(a, fd);
+
+    contents = open_memstream(&buf, &buflen);
+    fprintf(contents, "%s = %s\n", "pkgname", pkg->name);
+    fprintf(contents, "%s = %s\n", "pkgver", pkg->version);
+    fprintf(contents, "%s = %s\n", "arch", pkg->arch);
+    fclose(contents);
+
+    e = archive_entry_new();
+    archive_entry_set_pathname(e, ".PKGINFO");
+    archive_entry_set_perm(e, 0644);
+    archive_entry_set_filetype(e, AE_IFREG);
+    archive_entry_set_size(e, buflen);
+    archive_write_header(a, e);
+    archive_write_data(a, buf, buflen);
+    free(buf);
+
+    for(i = pkg->files; i; i = i->next) {
+        pt_pkg_file_t *f = i->data;
+        size_t len = strlen(f->contents);
+        archive_entry_clear(e);
+        archive_entry_set_pathname(e, f->path);
+        archive_entry_set_perm(e, 0644);
+        archive_entry_set_filetype(e, AE_IFREG);
+        archive_entry_set_size(e, len);
+        archive_write_header(a, e);
+        archive_write_data(a, f->contents, len);
+        archive_entry_free(e);
+    }
+
+    archive_entry_free(e);
+    archive_write_free(a);
+    close(fd);
+    return 0;
+}
+
 int pt_install_db(pt_env_t *pt, pt_db_t *db) {
     alpm_list_t *i;
     struct archive *a = archive_write_new();
