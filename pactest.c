@@ -164,14 +164,14 @@ pt_env_t *pt_new(const char *dbpath) {
     if(mkdtemp(root) == NULL) { return NULL; }
     if((pt = calloc(sizeof(pt_env_t), 1)) == NULL) { return NULL; }
     pt->root = strdup(root);
-    pt->dbpath = strdup(dbpath);
     pt->rootfd = open(pt->root, O_DIRECTORY);
+    pt->dbpath = strdup(dbpath);
+    pt_mkdirat(pt->rootfd, 0700, pt->dbpath);
     pt->dbfd = openat(pt->rootfd, pt->dbpath, O_DIRECTORY);
     return pt;
 }
 
 alpm_handle_t *pt_initialize(pt_env_t *pt, alpm_errno_t *err) {
-    pt_mkdirat(pt->rootfd, 0700, pt->dbpath);
     if(err) { *err = 0; }
     pt->handle = alpm_initialize(pt->root, pt->dbpath, err);
     return pt->handle;
