@@ -168,6 +168,7 @@ pt_env_t *pt_new(const char *dbpath) {
     pt->dbpath = strdup(dbpath);
     pt_mkdirat(pt->rootfd, 0700, pt->dbpath);
     pt->dbfd = openat(pt->rootfd, pt->dbpath, O_DIRECTORY);
+    pt_writeat(pt->dbfd, "local/ALPM_DB_VERSION", "9");
     return pt;
 }
 
