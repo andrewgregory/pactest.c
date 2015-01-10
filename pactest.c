@@ -149,8 +149,8 @@ int pt_writeat(int dd, const char *path, const char *contents) {
         pt_mkdirat(dd, 0700, dir);
         free(dir);
     }
-    if((fd = openat(dd, path, flags, 0700)) == -1) {
-        return 0;
+    if((fd = openat(dd, path, flags, 0644)) == -1) {
+        return -1;
     }
     write(fd, contents, strlen(contents));
     close(fd);
