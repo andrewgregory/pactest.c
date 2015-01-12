@@ -518,18 +518,17 @@ int pt_install_pkg(pt_env_t *pt, pt_pkg_t *pkg) {
 }
 
 void pt_cleanup(pt_env_t *pt) {
-    if(pt != NULL) { 
-        close(pt->rootfd);
-        pt_rmrfat(AT_FDCWD, pt->root);
-        free(pt->root);
-        free(pt->dbpath);
-        alpm_release(pt->handle);
-        alpm_list_free_inner(pt->dbs, (alpm_list_fn_free)_pt_db_free);
-        alpm_list_free_inner(pt->pkgs, (alpm_list_fn_free)_pt_pkg_free);
-        alpm_list_free(pt->dbs);
-        alpm_list_free(pt->pkgs);
-        free(pt);
-    }
+    if(pt == NULL) { return; }
+    close(pt->rootfd);
+    pt_rmrfat(AT_FDCWD, pt->root);
+    free(pt->root);
+    free(pt->dbpath);
+    alpm_release(pt->handle);
+    alpm_list_free_inner(pt->dbs, (alpm_list_fn_free)_pt_db_free);
+    alpm_list_free_inner(pt->pkgs, (alpm_list_fn_free)_pt_pkg_free);
+    alpm_list_free(pt->dbs);
+    alpm_list_free(pt->pkgs);
+    free(pt);
 }
 
 pt_db_t *pt_db_new(pt_env_t *pt, const char *dbname) {
