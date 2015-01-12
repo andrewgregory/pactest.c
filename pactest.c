@@ -252,27 +252,6 @@ alpm_handle_t *pt_initialize(pt_env_t *pt, alpm_errno_t *err) {
     return pt->handle;
 }
 
-int _pt_write_list(struct archive *a, const char *section, alpm_list_t *values) {
-    alpm_list_t *i;
-    archive_write_data(a, "%", 1);
-    archive_write_data(a, section, strlen(section));
-    archive_write_data(a, "\n", 2);
-    for(i = values; i; i = i->next) {
-        const char *buf = i->data;
-        archive_write_data(a, buf, strlen(buf));
-        archive_write_data(a, "\n", 1);
-    }
-    archive_write_data(a, "\n", 1);
-}
-
-int _pt_write_entry(struct archive *a, const char *section, const char *value) {
-    archive_write_data(a, "%", 1);
-    archive_write_data(a, section, strlen(section));
-    archive_write_data(a, "%\n", 2);
-    archive_write_data(a, value, strlen(value));
-    archive_write_data(a, "\n", 1);
-}
-
 void _pt_path(pt_env_t *pt, char *dest, const char *path) {
     if(path[0] == '/') {
         strcpy(dest, path);
@@ -359,72 +338,99 @@ int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
     return 0;
 }
 
+int _pt_fwrite_dbentry(FILE *f, const char *section, const char *value) {
+    if(value == NULL) { return 0; }
+    return fprintf(f, "%%%s%%\n%s\n\n", section, value);
+}
+
+void _pt_fwrite_dblist(FILE *f, const char *section, alpm_list_t *values) {
+    fprintf(f, "%%%s%%\n", section);
+    while(values) {
+        fprintf(f, "%s\n", (char *) values->data);
+        values = values->next;
+    }
+    fputc('\n', f);
+}
+
 int pt_install_db(pt_env_t *pt, pt_db_t *db) {
     alpm_list_t *i;
     struct archive *a = archive_write_new();
-    struct archive_entry *e;
-    char dbpath[PATH_MAX];
+    struct archive_entry *e = archive_entry_new();
+    char path[PATH_MAX];
     int fd;
-    
-    pt_mkdirat(pt->dbfd, 0700, "sync");
-    sprintf(dbpath, "sync/%s.db", db->name);
-    fd = openat(pt->dbfd, dbpath, O_CREAT, 0700);
+
+    pt_mkdirat(pt->dbfd, 0755, "sync");
+    sprintf(path, "sync/%s.db", db->name);
+    fd = openat(pt->dbfd, path, O_CREAT | O_WRONLY, 0644);
 
     archive_write_set_format_ustar(a);
     archive_write_open_fd(a, fd);
     for(i = db->pkgs; i; i = i->next) {
         pt_pkg_t *pkg = i->data;
-        char fpath[PATH_MAX];
+        size_t buflen = 0;
+        char *buf;
+        FILE *f;
 
-        sprintf(fpath, "%s-%s/depends", pkg->name, pkg->version);
-        e = archive_entry_new();
-        archive_entry_set_pathname(e, fpath);
+        sprintf(path, "%s-%s/", pkg->name, pkg->version);
+        archive_entry_clear(e);
+        archive_entry_set_pathname(e, path);
+        archive_entry_set_filetype(e, AE_IFDIR);
+        archive_entry_set_perm(e, 0755);
         archive_write_header(a, e);
-        _pt_write_list(a, "DEPENDS", pkg->depends);
-        _pt_write_list(a, "CONFLICTS", pkg->conflicts);
-        _pt_write_list(a, "PROVIDES", pkg->provides);
-        _pt_write_list(a, "OPTDEPENDS", pkg->optdepends);
-        _pt_write_list(a, "MAKEDEPENDS", pkg->makedepends);
-        _pt_write_list(a, "CHECKDEPENDS", pkg->checkdepends);
-        archive_entry_free(e);
 
-        sprintf(fpath, "%s-%s/desc", pkg->name, pkg->version);
-        e = archive_entry_new();
-        archive_entry_set_pathname(e, fpath);
+        f = open_memstream(&buf, &buflen);
+        _pt_fwrite_dblist(f, "DEPENDS", pkg->depends);
+        _pt_fwrite_dblist(f, "CONFLICTS", pkg->conflicts);
+        _pt_fwrite_dblist(f, "PROVIDES", pkg->provides);
+        _pt_fwrite_dblist(f, "OPTDEPENDS", pkg->optdepends);
+        _pt_fwrite_dblist(f, "MAKEDEPENDS", pkg->makedepends);
+        _pt_fwrite_dblist(f, "CHECKDEPENDS", pkg->checkdepends);
+        fclose(f);
+
+        sprintf(path, "%s-%s/depends", pkg->name, pkg->version);
+        archive_entry_clear(e);
+        archive_entry_set_pathname(e, path);
+        archive_entry_set_filetype(e, AE_IFREG);
+        archive_entry_set_perm(e, 0644);
+        archive_entry_set_size(e, buflen);
         archive_write_header(a, e);
-        _pt_write_entry(a, "FILENAME", pkg->filename);
-        _pt_write_entry(a, "NAME", pkg->name);
-        _pt_write_entry(a, "BASE", pkg->base);
-        _pt_write_entry(a, "VERSION", pkg->version);
-        _pt_write_entry(a, "DESC", pkg->desc);
-        _pt_write_list(a, "GROUPS", pkg->groups);
-        _pt_write_entry(a, "CSIZE", pkg->csize);
-        _pt_write_entry(a, "ISIZE", pkg->isize);
-        archive_entry_free(e);
+        archive_write_data(a, buf, buflen);
+        free(buf);
+
+        f = open_memstream(&buf, &buflen);
+        _pt_fwrite_dbentry(f, "FILENAME", pkg->filename);
+        _pt_fwrite_dbentry(f, "NAME", pkg->name);
+        _pt_fwrite_dbentry(f, "ARCH", pkg->arch);
+        _pt_fwrite_dbentry(f, "BASE", pkg->base);
+        _pt_fwrite_dbentry(f, "VERSION", pkg->version);
+        _pt_fwrite_dbentry(f, "DESC", pkg->desc);
+        _pt_fwrite_dblist(f, "GROUPS", pkg->groups);
+        _pt_fwrite_dbentry(f, "CSIZE", "200");
+        _pt_fwrite_dbentry(f, "ISIZE", pkg->isize);
+        fclose(f);
+
+        sprintf(path, "%s-%s/desc", pkg->name, pkg->version);
+        archive_entry_clear(e);
+        archive_entry_set_pathname(e, path);
+        archive_entry_set_filetype(e, AE_IFREG);
+        archive_entry_set_perm(e, 0644);
+        archive_entry_set_size(e, buflen);
+        archive_write_header(a, e);
+        archive_write_data(a, buf, buflen);
+        free(buf);
     }
+
+    archive_entry_free(e);
     archive_write_free(a);
     close(fd);
     return 0;
-}
-
-int _pt_dwrite_entry(int fd, const char *section, const char *value) {
-    if(value == NULL) { return 0; }
-    return dprintf(fd, "%%%s%%\n%s\n\n", section, value);
-}
-
-void _pt_dwrite_list(int fd, const char *section, alpm_list_t *values) {
-    dprintf(fd, "%%%s%%\n", section);
-    while(values) {
-        dprintf(fd, "%s\n", (char *) values->data);
-        values = values->next;
-    }
-    write(fd, "\n", 1);
 }
 
 int pt_add_pkg_to_localdb(pt_env_t *pt, pt_pkg_t *pkg) {
     alpm_list_t *i;
     char path[PATH_MAX] = "";
     int fd;
+    FILE *f;
 
     snprintf(path, PATH_MAX, "local/%s-%s", pkg->name, pkg->version);
     pt_mkdirat(pt->dbfd, 0700, path);
@@ -433,38 +439,40 @@ int pt_add_pkg_to_localdb(pt_env_t *pt, pt_pkg_t *pkg) {
 
     snprintf(path, PATH_MAX, "local/%s-%s/files", pkg->name, pkg->version);
     fd = openat(pt->dbfd, path, O_CREAT | O_WRONLY, 0644);
-    dprintf(fd, "%%%s%%\n", "FILES");
+    f = fdopen(fd, "w");
+    fprintf(f, "%%%s%%\n", "FILES");
     for(i = pkg->files; i; i = i->next) {
         /* TODO: fill in parent directories? */
-        pt_pkg_file_t *f = i->data;
-        dprintf(fd, "%s\n", f->path);
+        pt_pkg_file_t *file = i->data;
+        fprintf(f, "%s\n", file->path);
     }
-    write(fd, "\n", 1);
-    dprintf(fd, "%%%s%%\n", "BACKUP");
+    fputc('\n', f);
+    fprintf(f, "%%%s%%\n", "BACKUP");
     for(i = pkg->backup; i; i = i->next) {
-        pt_pkg_file_t *f = i->data;
-        dprintf(fd, "%s\n", f->path);
+        pt_pkg_file_t *file = i->data;
+        fprintf(f, "%s\n", file->path);
     }
-    write(fd, "\n", 1);
-    close(fd);
+    fputc('\n', f);
+    fclose(f);
 
     snprintf(path, PATH_MAX, "local/%s-%s/desc", pkg->name, pkg->version);
     fd = openat(pt->dbfd, path, O_CREAT | O_WRONLY, 0644);
-    _pt_dwrite_entry(fd, "FILENAME", pkg->filename);
-    _pt_dwrite_entry(fd, "NAME", pkg->name);
-    _pt_dwrite_entry(fd, "BASE", pkg->base);
-    _pt_dwrite_entry(fd, "VERSION", pkg->version);
-    _pt_dwrite_entry(fd, "DESC", pkg->desc);
-    _pt_dwrite_entry(fd, "CSIZE", pkg->csize);
-    _pt_dwrite_entry(fd, "ISIZE", pkg->isize);
-    _pt_dwrite_list(fd, "GROUPS", pkg->groups);
-    _pt_dwrite_list(fd, "DEPENDS", pkg->depends);
-    _pt_dwrite_list(fd, "CONFLICTS", pkg->conflicts);
-    _pt_dwrite_list(fd, "PROVIDES", pkg->provides);
-    _pt_dwrite_list(fd, "OPTDEPENDS", pkg->optdepends);
-    _pt_dwrite_list(fd, "MAKEDEPENDS", pkg->makedepends);
-    _pt_dwrite_list(fd, "CHECKDEPENDS", pkg->checkdepends);
-    close(fd);
+    f = fdopen(fd, "w");
+    _pt_fwrite_dbentry(f, "FILENAME", pkg->filename);
+    _pt_fwrite_dbentry(f, "NAME", pkg->name);
+    _pt_fwrite_dbentry(f, "BASE", pkg->base);
+    _pt_fwrite_dbentry(f, "VERSION", pkg->version);
+    _pt_fwrite_dbentry(f, "DESC", pkg->desc);
+    _pt_fwrite_dbentry(f, "CSIZE", pkg->csize);
+    _pt_fwrite_dbentry(f, "ISIZE", pkg->isize);
+    _pt_fwrite_dblist(f, "GROUPS", pkg->groups);
+    _pt_fwrite_dblist(f, "DEPENDS", pkg->depends);
+    _pt_fwrite_dblist(f, "CONFLICTS", pkg->conflicts);
+    _pt_fwrite_dblist(f, "PROVIDES", pkg->provides);
+    _pt_fwrite_dblist(f, "OPTDEPENDS", pkg->optdepends);
+    _pt_fwrite_dblist(f, "MAKEDEPENDS", pkg->makedepends);
+    _pt_fwrite_dblist(f, "CHECKDEPENDS", pkg->checkdepends);
+    fclose(f);
 
     return 0;
 }
