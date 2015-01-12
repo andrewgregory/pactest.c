@@ -297,6 +297,20 @@ int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
         free(dir);
     }
 
+    if((c = strrchr(path, '.'))) {
+        if(strcmp(c, ".bz2") == 0) {
+            archive_write_add_filter_bzip2(a);
+        } else if(strcmp(c, ".gz") == 0) {
+            archive_write_add_filter_gzip(a);
+        } else if(strcmp(c, ".xz") == 0) {
+            archive_write_add_filter_xz(a);
+        } else if(strcmp(c, ".lz") == 0) {
+            archive_write_add_filter_lzip(a);
+        } else if(strcmp(c, ".Z") == 0) {
+            archive_write_add_filter_compress(a);
+        }
+    }
+
     archive_write_set_format_ustar(a);
     archive_write_open_fd(a, fd);
 
