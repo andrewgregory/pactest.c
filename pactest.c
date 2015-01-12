@@ -289,6 +289,13 @@ int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
     struct archive *a = archive_write_new();
     struct archive_entry *e;
     int fd = openat(dd, path, O_CREAT | O_WRONLY, 0644);;
+    char *c;
+
+    if((c = strrchr(path, '/'))) {
+        char *dir = strndup(path, c - path);
+        pt_mkdirat(dd, 0755, dir);
+        free(dir);
+    }
 
     archive_write_set_format_ustar(a);
     archive_write_open_fd(a, fd);
