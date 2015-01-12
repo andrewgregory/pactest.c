@@ -51,7 +51,14 @@ typedef struct pt_db_t {
     alpm_list_t *pkgs;
 } pt_db_t;
 
+enum pt_ftype {
+    PT_FTYPE_FILE,
+    PT_FTYPE_SYMLINK,
+    PT_FTYPE_DIRECTORY
+};
+
 typedef struct pt_pkg_file_t {
+    enum pt_ftype type;
     char *path;
     char *contents;
 } pt_pkg_file_t;
@@ -81,6 +88,32 @@ typedef struct pt_pkg_t {
     char *scriptlet;
     char *version;
 } pt_pkg_t;
+
+void _pt_pkg_file_free(pt_pkg_file_t *f) {
+    if(f == NULL) { return; }
+    free(f->path);
+    free(f->contents);
+    free(f);
+}
+
+void _pt_db_free(pt_db_t *db) {
+    if(db == NULL) { return; }
+    alpm_list_free(db->pkgs);
+    free(db->name);
+    free(db);
+}
+
+void _pt_pkg_free(pt_pkg_t *pkg) {
+    if(pkg == NULL) { return; }
+    alpm_list_free_inner(pkg->files, (alpm_list_fn_free) _pt_pkg_file_free);
+    alpm_list_free(pkg->files);
+    free(pkg->name);
+    free(pkg);
+}
+
+/******************************************
+ * file system utilities
+ ******************************************/
 
 void pt_rmrfat(int dd, const char *path) {
     if(!unlinkat(dd, path, 0)) {
@@ -144,6 +177,16 @@ int pt_grepat(int dd, const char *path, const char *needle) {
     }
     fclose(f);
     return 0;
+}
+
+int pt_symlinkat(int dd, const char *path, const char *target) {
+    char *c;
+    if((c = strrchr(path, '/'))) {
+        char *dir = strndup(path, c - path);
+        pt_mkdirat(dd, 0700, dir);
+        free(dir);
+    }
+    return symlinkat(target, dd, path);
 }
 
 int pt_writeat(int dd, const char *path, const char *contents) {
@@ -241,15 +284,26 @@ int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
 
     for(i = pkg->files; i; i = i->next) {
         pt_pkg_file_t *f = i->data;
-        size_t len = strlen(f->contents);
+        size_t len = f->contents ? strlen(f->contents) : 0;
         archive_entry_clear(e);
         archive_entry_set_pathname(e, f->path);
-        archive_entry_set_perm(e, 0644);
-        archive_entry_set_filetype(e, AE_IFREG);
+        switch(f->type) {
+            case PT_FTYPE_FILE:
+                archive_entry_set_filetype(e, AE_IFREG);
+                archive_entry_set_perm(e, 0644);
+                break;
+            case PT_FTYPE_SYMLINK:
+                archive_entry_set_filetype(e, AE_IFLNK);
+                archive_entry_set_perm(e, 0644);
+                break;
+            case PT_FTYPE_DIRECTORY:
+                archive_entry_set_filetype(e, AE_IFDIR);
+                archive_entry_set_perm(e, 0755);
+                break;
+        }
         archive_entry_set_size(e, len);
         archive_write_header(a, e);
         archive_write_data(a, f->contents, len);
-        archive_entry_free(e);
     }
 
     archive_entry_free(e);
@@ -304,13 +358,6 @@ int pt_install_db(pt_env_t *pt, pt_db_t *db) {
     archive_write_free(a);
     close(fd);
     return 0;
-}
-
-void pt_pkg_add_file(pt_pkg_t *pkg, const char *path, const char *contents) {
-    pt_pkg_file_t *f = malloc(sizeof(pt_pkg_file_t));
-    f->path = strdup(path);
-    f->contents = strdup(contents);
-    pkg->files = alpm_list_add(pkg->files, f);
 }
 
 int _pt_dwrite_entry(int fd, const char *section, const char *value) {
@@ -375,29 +422,52 @@ int pt_add_pkg_to_localdb(pt_env_t *pt, pt_pkg_t *pkg) {
     return 0;
 }
 
+pt_pkg_file_t *pt_pkg_add_file(pt_pkg_t *pkg, const char *path, const char *contents) {
+    pt_pkg_file_t *f;
+    if((f = calloc(sizeof(pt_pkg_file_t), 1)) == NULL) { return NULL; }
+    if((f->path = strdup(path)) == NULL) { _pt_pkg_file_free(f); return NULL; }
+    if((f->contents = strdup(contents)) == NULL) { _pt_pkg_file_free(f); return NULL; }
+    pkg->files = alpm_list_add(pkg->files, f);
+    return f;
+}
+
+pt_pkg_file_t *pt_pkg_add_symlink(pt_pkg_t *pkg, const char *path, const char *dest) {
+    pt_pkg_file_t *f;
+    if((f = calloc(sizeof(pt_pkg_file_t), 1)) == NULL) { return NULL; }
+    if((f->path = strdup(path)) == NULL) { _pt_pkg_file_free(f); return NULL; }
+    if((f->contents = strdup(dest)) == NULL) { _pt_pkg_file_free(f); return NULL; }
+    f->type = PT_FTYPE_SYMLINK;
+    pkg->files = alpm_list_add(pkg->files, f);
+    return f;
+}
+
+pt_pkg_file_t *pt_pkg_add_dir(pt_pkg_t *pkg, const char *path) {
+    pt_pkg_file_t *f;
+    if((f = calloc(sizeof(pt_pkg_file_t), 1)) == NULL) { return NULL; }
+    if((f->path = strdup(path)) == NULL) { _pt_pkg_file_free(f); return NULL; }
+    f->type = PT_FTYPE_DIRECTORY;
+    pkg->files = alpm_list_add(pkg->files, f);
+    return f;
+}
+
 int pt_install_pkg(pt_env_t *pt, pt_pkg_t *pkg) {
     alpm_list_t *i;
     pt_add_pkg_to_localdb(pt, pkg);
     for(i = pkg->files; i; i = i->next) {
         pt_pkg_file_t *f = i->data;
-        pt_writeat(pt->rootfd, f->path, f->contents);
+        switch(f->type) {
+            case PT_FTYPE_FILE:
+                pt_writeat(pt->rootfd, f->path, f->contents);
+                break;
+            case PT_FTYPE_SYMLINK:
+                pt_symlinkat(pt->rootfd, f->path, f->contents);
+                break;
+            case PT_FTYPE_DIRECTORY:
+                pt_mkdirat(pt->rootfd, 0755, f->path);
+                break;
+        }
     }
     return 0;
-}
-
-void _pt_db_free(pt_db_t *db) {
-    if(db != NULL) {
-        alpm_list_free(db->pkgs);
-        free(db->name);
-        free(db);
-    }
-}
-
-void _pt_pkg_free(pt_pkg_t *pkg) {
-    if(pkg != NULL) {
-        free(pkg->name);
-        free(pkg);
-    }
 }
 
 void pt_cleanup(pt_env_t *pt) {
