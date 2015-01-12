@@ -650,4 +650,30 @@ int pt_fexecve(int fd, char *const argv[], char *const envp[],
 #undef _PT_DUP
 }
 
+/*****************************************
+ * Tests
+ *****************************************/
+
+char *pt_test_pkg_version(pt_env_t *pt, const char *pkgname) {
+    static char version[PATH_MAX];
+    int dd = openat(pt->dbfd, "local", O_DIRECTORY);
+    DIR *dirp = fdopendir(dd);
+    struct dirent entry, *result;
+
+    version[0] = '\0';
+
+    while(readdir_r(dirp, &entry, &result) == 0 && result) {
+        char *c, *dname = entry.d_name;
+        for(c = dname + strlen(dname); c > dname && *c != '-'; c--);
+        for(c--; c > dname && *c != '-'; c--);
+        if(c > dname && strncmp(dname, pkgname, c - dname) == 0) {
+            strcpy(version, c + 1);
+            break;
+        }
+    }
+
+    closedir(dirp);
+    return version[0] == '\0' ? NULL : version;
+}
+
 #endif /* PACTEST_C */
