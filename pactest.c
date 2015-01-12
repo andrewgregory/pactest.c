@@ -546,6 +546,22 @@ pt_pkg_t *pt_pkg_new(pt_env_t *pt, const char *pkgname, const char *pkgver) {
     return pkg;
 }
 
+void pt_sarray_cat(const char **sarray, ...) {
+    size_t idx = 0;
+    va_list ap;
+    va_start(ap, sarray);
+    while(sarray[idx] != NULL) { idx++; }
+    while((sarray[idx++] = va_arg(ap, const char *)) != NULL);
+    va_end(ap);
+}
+
+void pt_sarray_cpy(const char **sarray, size_t idx, ...) {
+    va_list ap;
+    va_start(ap, idx);
+    while((sarray[idx++] = va_arg(ap, const char *)) != NULL);
+    va_end(ap);
+}
+
 int pt_fexecve(int fd, char *const argv[], char *const envp[],
         int cwd, FILE *out, FILE *err) {
     int opipe[2], epipe[2];
