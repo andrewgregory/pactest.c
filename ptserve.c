@@ -1,12 +1,37 @@
-#include <fcntl.h>
+/*
+ * Copyright 2015 Andrew Gregory <andrew.gregory.8@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ *
+ * Project URL: http://github.com/andrewgregory/pactest.c
+ */
+
+#ifndef PTSERVE_C
+#define PTSERVE_C
+
+#define PTSERVE_C_VERSION 0.1
+
 #include <arpa/inet.h>
-#include <unistd.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/wait.h>
-#include <signal.h>
-#include <fcntl.h>
-#include <limits.h>
 
 #include <alpm.h>
 
@@ -90,18 +115,19 @@ static ssize_t _dgetdelim(int fd, char *buf, ssize_t bufsiz, char *delim) {
  * http message
  ****************************************************************************/
 
+#define PTSERVE_HDR_MAX 1024
 ptserve_message_t *ptserve_message_new(ptserve_t *server, int socket_fd) {
 	ptserve_message_t *msg = calloc(sizeof(ptserve_message_t), 1);
-	char line[LINE_MAX];
+	char line[PTSERVE_HDR_MAX];
 
-	_dgetdelim(socket_fd, line, LINE_MAX, " ");
+	_dgetdelim(socket_fd, line, PTSERVE_HDR_MAX, " ");
 	msg->method = strdup(line);
-	_dgetdelim(socket_fd, line, LINE_MAX, " ");
+	_dgetdelim(socket_fd, line, PTSERVE_HDR_MAX, " ");
 	msg->path = strdup(line);
-	_dgetdelim(socket_fd, line, LINE_MAX, "\r\n");
+	_dgetdelim(socket_fd, line, PTSERVE_HDR_MAX, "\r\n");
 	msg->protocol = strdup(line);
 
-	while(_dgetdelim(socket_fd, line, LINE_MAX, "\r\n") > 0) {
+	while(_dgetdelim(socket_fd, line, PTSERVE_HDR_MAX, "\r\n") > 0) {
 		msg->headers = alpm_list_add(msg->headers, strdup(line));
 	}
 
@@ -193,7 +219,7 @@ void ptserve_listen(ptserve_t *ptserve) {
 	struct sockaddr_in sin;
 	socklen_t addrlen = sizeof(sin);
 
-	if(ptserve->sd_server >= 0) { return; }
+	if(ptserve->sd_server >= 0) { return; } /* already listening */
 
 	memset(&sin, 0, sizeof(sin));
 	sin.sin_family = AF_INET;
@@ -203,11 +229,10 @@ void ptserve_listen(ptserve_t *ptserve) {
 	ptserve->sd_server = socket(PF_INET, SOCK_STREAM, 0);
 	bind(ptserve->sd_server, (struct sockaddr*) &sin, sizeof(sin));
 	getsockname(ptserve->sd_server, (struct sockaddr*) &sin, &addrlen);
-	ptserve->port = ntohs(sin.sin_port);
 
 	listen(ptserve->sd_server, SOMAXCONN);
 
-
+	ptserve->port = ntohs(sin.sin_port);
 	_asprintf(&ptserve->url, "http://127.0.0.1:%d", ptserve->port);
 }
 
@@ -217,6 +242,7 @@ int ptserve_accept(ptserve_t *ptserve) {
 
 void *ptserve_serve(ptserve_t *ptserve) {
 	int session_fd;
+	ptserve_listen(ptserve);
 	while((session_fd = ptserve_accept(ptserve)) >= 0) {
 		ptserve_message_t *msg = ptserve_message_new(ptserve, session_fd);
 		ptserve->response_cb(msg);
@@ -229,7 +255,7 @@ void *ptserve_serve(ptserve_t *ptserve) {
  * ptserve helpers
  ****************************************************************************/
 
-void ptserve_serve_file(int socket, int rootfd, const char *path) {
+void ptserve_send_file(int socket, int rootfd, const char *path) {
 	struct stat sbuf;
 	ssize_t nread;
 	char buf[128];
@@ -240,6 +266,14 @@ void ptserve_serve_file(int socket, int rootfd, const char *path) {
 	_sendf(socket, "\r\n");
 	while((nread = read(fd, buf, 128)) > 0 && _send(socket, buf, nread));
 	close(fd);
+}
+
+void ptserve_send_str(int socket, const char *body) {
+	size_t blen = strlen(body);
+	_sendf(socket, "HTTP/1.1 200 OK\r\n");
+	_sendf(socket, "Content-Length: %zd\r\n", blen);
+	_sendf(socket, "\r\n");
+	_send(socket, body, blen);
 }
 
 void ptserve_cb_dir(ptserve_message_t *request) {
@@ -255,21 +289,10 @@ void ptserve_cb_dir(ptserve_message_t *request) {
 	}
 	/* strip leading '/' */
 	if(path[0] == '/') { path++; }
-	ptserve_serve_file(request->socket_fd, request->ptserve->rootfd, path);
+	ptserve_send_file(request->socket_fd, request->ptserve->rootfd, path);
 }
 
-ptserve_t *ptserve_new_dir(int fd, const char *path) {
-	ptserve_t *ptserve = ptserve_new();
-	int rootfd = openat(fd, path, O_RDONLY | O_DIRECTORY);
-	if(ptserve == NULL || (ptserve->rootfd = rootfd) < 0) {
-		free(ptserve);
-		return NULL;
-	}
-	ptserve->response_cb = ptserve_cb_dir;
-	return ptserve;
-}
-
-ptserve_t *ptserve_new_cb(int fd, ptserve_response_cb_t *cb, void *data) {
+ptserve_t *ptserve_serve_cbat(int fd, ptserve_response_cb_t *cb, void *data) {
 	ptserve_t *ptserve = ptserve_new();
 	if(ptserve == NULL) {
 		free(ptserve);
@@ -278,14 +301,28 @@ ptserve_t *ptserve_new_cb(int fd, ptserve_response_cb_t *cb, void *data) {
 	ptserve->rootfd = fd;
 	ptserve->response_cb = cb;
 	ptserve->data = data;
+	ptserve_serve(ptserve);
 	return ptserve;
 }
 
+ptserve_t *ptserve_serve_cb(ptserve_response_cb_t *cb, void *data) {
+	return ptserve_serve_cbat(AT_FDCWD, cb, data);
+}
+
 ptserve_t *ptserve_serve_dirat(int fd, const char *path) {
-	ptserve_t *ptserve = ptserve_new_dir(fd, path);
-	ptserve_listen(ptserve);
+	ptserve_t *ptserve = ptserve_new();
+	int rootfd = openat(fd, path, O_RDONLY | O_DIRECTORY);
+	if(ptserve == NULL || (ptserve->rootfd = rootfd) < 0) {
+		free(ptserve);
+		return NULL;
+	}
+	ptserve->response_cb = ptserve_cb_dir;
 	ptserve_serve(ptserve);
 	return ptserve;
+}
+
+ptserve_t *ptserve_serve_dir(const char *path) {
+	return ptserve_serve_dirat(AT_FDCWD, path);
 }
 
 /*****************************************************************************
@@ -297,7 +334,7 @@ void ptserve_set_proxy(ptserve_t *ptserve) {
 }
 
 int main(int argc, char *argv[]) {
-	ptserve_t *ptserve = ptserve_new_cb(AT_FDCWD, ptserve_cb_dir, NULL);
+	ptserve_t *ptserve = ptserve_serve_cbat(AT_FDCWD, ptserve_cb_dir, NULL);
 	ptserve_listen(ptserve);
 	printf("listening on port %d\n", ptserve->port);
 	ptserve_serve(ptserve);
@@ -316,5 +353,7 @@ int main_nocb(int argc, char *argv[]) {
 	}
 	ptserve_free(ptserve);
 }
+
+#endif /* PTSERVE_C */
 
 /* vim: set ts=2 sw=2 noet: */

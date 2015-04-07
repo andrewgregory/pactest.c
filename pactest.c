@@ -25,7 +25,7 @@
 #ifndef PACTEST_C
 #define PACTEST_C
 
-#define PACTEST_C_VERSION 1.0
+#define PACTEST_C_VERSION 0.1
 
 #include <dirent.h>
 #include <errno.h>
