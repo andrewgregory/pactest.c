@@ -24,11 +24,25 @@ typedef void (ptserve_response_cb_t)(ptserve_message_t *request);
 typedef struct ptserve_t {
 	ptserve_response_cb_t *response_cb;
 	uint16_t port;
+	char *url;
 	void *data;
 	int rootfd;
 	pid_t _pid;
 	int sd_server;
 } ptserve_t;
+
+static int _vasprintf(char **strp, const char *fmt, va_list args) {
+	size_t len = vsnprintf(NULL, 0, fmt, args);
+	*strp = malloc(len + 1);
+	vsprintf(*strp, fmt, args);
+}
+
+static int _asprintf(char **strp, const char *fmt, ...) {
+	va_list args;
+	va_start(args, fmt);
+	_vasprintf(strp, fmt, args);
+	va_end(args);
+}
 
 static ssize_t _send(int socket, const void *buf, size_t len) {
 	return send(socket, buf, len, MSG_NOSIGNAL);
@@ -37,13 +51,11 @@ static ssize_t _send(int socket, const void *buf, size_t len) {
 static ssize_t _sendf(int socket, const char *fmt, ...) {
 	ssize_t ret;
 	char *buf = NULL;
-	size_t blen = 0;
-	FILE *fbuf = open_memstream(&buf, &blen);
+	int blen = 0;
 	va_list args;
 	va_start(args, fmt);
-	vfprintf(fbuf, fmt, args);
+	blen = _vasprintf(&buf, fmt, args);
 	va_end(args);
-	fclose(fbuf);
 	ret = _send(socket, buf, blen);
 	free(buf);
 	return ret;
@@ -111,14 +123,27 @@ const char *ptserve_message_get_header(ptserve_message_t *msg, const char *hdr) 
 	return NULL;
 }
 
+void ptserve_message_rm_header(ptserve_message_t *msg, const char *hdr) {
+	alpm_list_t *i;
+	size_t hlen = strlen(hdr);
+	for(i = msg->headers; i; i = i->next) {
+		char *oldheader = i->data;
+		if(strncasecmp(i->data, hdr, hlen) == 0 && oldheader[hlen] == ':') {
+			msg->headers = alpm_list_remove_item(msg->headers, i);
+			free(i->data);
+			free(i);
+			return;
+		}
+	}
+}
+
 int ptserve_message_set_header(ptserve_message_t *message,
 		const char *header, const char *value) {
 	alpm_list_t *i;
+	char *newheader;
 	size_t hlen = strlen(header);
-	char *newheader = malloc(hlen + strlen(": ") + strlen(value) + 1);
 
-	if(newheader == NULL) { return 0; }
-	sprintf("%s: %s", header, value);
+	if(_asprintf(&newheader, "%s: %s", header, value) == -1) { return 0; }
 
 	/* look for an existing header */
 	for(i = message->headers; i; i = i->next) {
@@ -143,12 +168,9 @@ void ptserve_serve_file(int socket, int rootfd, const char *path) {
 	_sendf(socket, "HTTP/1.1 200 OK\r\n");
 	_sendf(socket, "Content-Length: %zd\r\n", sbuf.st_size);
 	_sendf(socket, "\r\n");
-	printf("finished headers %s %zd\n", path, sbuf.st_size);
 	while((nread = read(fd, buf, 128)) > 0 && send(socket, buf, nread, MSG_NOSIGNAL)) {
-		printf("wrote: %zd\n", nread);
 		fwrite(buf, nread, 1, stdout);
 	}
-	printf("finished serving %s\n", path);
 	close(fd);
 }
 
@@ -165,12 +187,19 @@ void ptserve_cb_dir(ptserve_message_t *request) {
 	}
 	/* strip leading '/' */
 	if(path[0] == '/') { path++; }
-	printf("serving %s\n", path);
 	ptserve_serve_file(request->socket_fd, request->ptserve->rootfd, path);
 }
 
-ptserve_t *ptserve_new_dir(int fd, const char *path) {
+ptserve_t *ptserve_new() {
 	ptserve_t *ptserve = calloc(sizeof(ptserve_t), 1);
+	if(ptserve == NULL) { return NULL; }
+	ptserve->rootfd = -1;
+	ptserve->sd_server = -1;
+	return ptserve;
+}
+
+ptserve_t *ptserve_new_dir(int fd, const char *path) {
+	ptserve_t *ptserve = ptserve_new();
 	int rootfd = openat(fd, path, O_RDONLY | O_DIRECTORY);
 	if(ptserve == NULL || (ptserve->rootfd = rootfd) < 0) {
 		free(ptserve);
@@ -181,7 +210,7 @@ ptserve_t *ptserve_new_dir(int fd, const char *path) {
 }
 
 ptserve_t *ptserve_new_cb(int fd, ptserve_response_cb_t *cb, void *data) {
-	ptserve_t *ptserve = calloc(sizeof(ptserve_t), 1);
+	ptserve_t *ptserve = ptserve_new();
 	if(ptserve == NULL) {
 		free(ptserve);
 		return NULL;
@@ -189,13 +218,14 @@ ptserve_t *ptserve_new_cb(int fd, ptserve_response_cb_t *cb, void *data) {
 	ptserve->rootfd = fd;
 	ptserve->response_cb = cb;
 	ptserve->data = data;
-	ptserve->sd_server = -1;
 	return ptserve;
 }
 
 void ptserve_free(ptserve_t *ptserve) {
+	if(ptserve == NULL) { return; }
 	kill(ptserve->_pid, SIGTERM);
 	waitpid(ptserve->_pid, NULL, 0);
+	free(ptserve->url);
 	free(ptserve);
 }
 
@@ -216,55 +246,55 @@ void ptserve_listen(ptserve_t *ptserve) {
 	ptserve->port = ntohs(sin.sin_port);
 
 	listen(ptserve->sd_server, SOMAXCONN);
+
+
+	_asprintf(&ptserve->url, "http://127.0.0.1:%d", ptserve->port);
 }
 
 int ptserve_accept(ptserve_t *ptserve) {
-	int session_fd = accept(ptserve->sd_server, 0, 0);
-	if(session_fd >= 0) {
-		ptserve_message_t *msg = ptserve_message_new(ptserve, session_fd);
-		ptserve->response_cb(msg);
-	}
-	return session_fd;
+	return accept(ptserve->sd_server, 0, 0);
 }
 
-void *ptserve_serve(void *ptserve) {
-	while(ptserve_accept(ptserve) >= 0);
+void *ptserve_serve(ptserve_t *ptserve) {
+	int session_fd;
+	while((session_fd = ptserve_accept(ptserve)) >= 0) {
+		ptserve_message_t *msg = ptserve_message_new(ptserve, session_fd);
+		ptserve->response_cb(msg);
+		ptserve_message_free(msg);
+	}
+	return NULL;
 }
 
 ptserve_t *ptserve_serve_dir(int fd, const char *path) {
 	ptserve_t *ptserve = ptserve_new_dir(fd, path);
 	ptserve_listen(ptserve);
+	ptserve_serve(ptserve);
 	return ptserve;
 }
 
-char *ptserve_get_url(ptserve_t *ptserve) {
-	int len = sprintf(NULL, 0, "http://127.0.0.1:%d", ptserve->port);
-	char *buf = malloc(len + 1);
-	sprintf(buf, "http://127.0.0.1:%d", ptserve->port);
-	return buf;
-}
-
 void ptserve_set_proxy(ptserve_t *ptserve) {
-	char *url = ptserve_get_url(ptserve);
-	setenv("http_proxy", url, 1);
-	free(url);
-}
-
-void testcb(ptserve_message_t *msg) {
-	alpm_list_t *i;
-	ptserve_cb_dir(msg);
-	puts("closing socket");
-	close(msg->socket_fd);
+	setenv("http_proxy", ptserve->url, 1);
 }
 
 int main(int argc, char *argv[]) {
-	ptserve_t *ptserve = ptserve_new_cb(AT_FDCWD, testcb, NULL);
+	ptserve_t *ptserve = ptserve_new_cb(AT_FDCWD, ptserve_cb_dir, NULL);
 	ptserve_listen(ptserve);
-
 	printf("listening on port %d\n", ptserve->port);
-
 	ptserve_serve(ptserve);
 	return 0;
+}
+
+int main_nocb(int argc, char *argv[]) {
+	int fd;
+	ptserve_t *ptserve = ptserve_new();
+	ptserve_listen(ptserve);
+	printf("listening on port %d\n", ptserve->port);
+	while((fd = ptserve_accept(ptserve)) >= 0) {
+		ptserve_message_t *msg = ptserve_message_new(ptserve, fd);
+		ptserve_cb_dir(msg);
+		ptserve_message_free(msg);
+	}
+	ptserve_free(ptserve);
 }
 
 /* vim: set ts=2 sw=2 noet: */
