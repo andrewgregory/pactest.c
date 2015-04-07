@@ -31,17 +31,23 @@ typedef struct ptserve_t {
 	int sd_server;
 } ptserve_t;
 
+/*****************************************************************************
+ * utilities
+ ****************************************************************************/
+
 static int _vasprintf(char **strp, const char *fmt, va_list args) {
 	size_t len = vsnprintf(NULL, 0, fmt, args);
-	*strp = malloc(len + 1);
-	vsprintf(*strp, fmt, args);
+	if((*strp = malloc(len + 1)) != NULL) { return vsprintf(*strp, fmt, args); }
+	else { return -1; }
 }
 
 static int _asprintf(char **strp, const char *fmt, ...) {
 	va_list args;
+	int ret;
 	va_start(args, fmt);
-	_vasprintf(strp, fmt, args);
+	ret = _vasprintf(strp, fmt, args);
 	va_end(args);
+	return ret;
 }
 
 static ssize_t _send(int socket, const void *buf, size_t len) {
@@ -79,6 +85,10 @@ static ssize_t _dgetdelim(int fd, char *buf, ssize_t bufsiz, char *delim) {
 		if(++b - buf >= bufsiz - 1) { return -1; }
 	}
 }
+
+/*****************************************************************************
+ * http message
+ ****************************************************************************/
 
 ptserve_message_t *ptserve_message_new(ptserve_t *server, int socket_fd) {
 	ptserve_message_t *msg = calloc(sizeof(ptserve_message_t), 1);
@@ -159,65 +169,15 @@ int ptserve_message_set_header(ptserve_message_t *message,
 	return 1;
 }
 
-void ptserve_serve_file(int socket, int rootfd, const char *path) {
-	struct stat sbuf;
-	ssize_t nread;
-	char buf[128];
-	int fd = openat(rootfd, path, O_RDONLY);
-	fstat(fd, &sbuf);
-	_sendf(socket, "HTTP/1.1 200 OK\r\n");
-	_sendf(socket, "Content-Length: %zd\r\n", sbuf.st_size);
-	_sendf(socket, "\r\n");
-	while((nread = read(fd, buf, 128)) > 0 && send(socket, buf, nread, MSG_NOSIGNAL)) {
-		fwrite(buf, nread, 1, stdout);
-	}
-	close(fd);
-}
-
-void ptserve_cb_dir(ptserve_message_t *request) {
-	char *c, *path = request->path;
-	/* strip protocol and location if present */
-	if((c = strstr(path, "://")) != NULL) {
-		path = c + 3;
-		if((c = strchr(path, '/')) != NULL) {
-			path = c + 1;
-		} else {
-			path = "/";
-		}
-	}
-	/* strip leading '/' */
-	if(path[0] == '/') { path++; }
-	ptserve_serve_file(request->socket_fd, request->ptserve->rootfd, path);
-}
+/*****************************************************************************
+ * ptserve
+ ****************************************************************************/
 
 ptserve_t *ptserve_new() {
 	ptserve_t *ptserve = calloc(sizeof(ptserve_t), 1);
 	if(ptserve == NULL) { return NULL; }
-	ptserve->rootfd = -1;
+	ptserve->rootfd = AT_FDCWD;
 	ptserve->sd_server = -1;
-	return ptserve;
-}
-
-ptserve_t *ptserve_new_dir(int fd, const char *path) {
-	ptserve_t *ptserve = ptserve_new();
-	int rootfd = openat(fd, path, O_RDONLY | O_DIRECTORY);
-	if(ptserve == NULL || (ptserve->rootfd = rootfd) < 0) {
-		free(ptserve);
-		return NULL;
-	}
-	ptserve->response_cb = ptserve_cb_dir;
-	return ptserve;
-}
-
-ptserve_t *ptserve_new_cb(int fd, ptserve_response_cb_t *cb, void *data) {
-	ptserve_t *ptserve = ptserve_new();
-	if(ptserve == NULL) {
-		free(ptserve);
-		return NULL;
-	}
-	ptserve->rootfd = fd;
-	ptserve->response_cb = cb;
-	ptserve->data = data;
 	return ptserve;
 }
 
@@ -265,12 +225,72 @@ void *ptserve_serve(ptserve_t *ptserve) {
 	return NULL;
 }
 
-ptserve_t *ptserve_serve_dir(int fd, const char *path) {
+/*****************************************************************************
+ * ptserve helpers
+ ****************************************************************************/
+
+void ptserve_serve_file(int socket, int rootfd, const char *path) {
+	struct stat sbuf;
+	ssize_t nread;
+	char buf[128];
+	int fd = openat(rootfd, path, O_RDONLY);
+	fstat(fd, &sbuf);
+	_sendf(socket, "HTTP/1.1 200 OK\r\n");
+	_sendf(socket, "Content-Length: %zd\r\n", sbuf.st_size);
+	_sendf(socket, "\r\n");
+	while((nread = read(fd, buf, 128)) > 0 && _send(socket, buf, nread));
+	close(fd);
+}
+
+void ptserve_cb_dir(ptserve_message_t *request) {
+	char *c, *path = request->path;
+	/* strip protocol and location if present */
+	if((c = strstr(path, "://")) != NULL) {
+		path = c + 3;
+		if((c = strchr(path, '/')) != NULL) {
+			path = c + 1;
+		} else {
+			path = "/";
+		}
+	}
+	/* strip leading '/' */
+	if(path[0] == '/') { path++; }
+	ptserve_serve_file(request->socket_fd, request->ptserve->rootfd, path);
+}
+
+ptserve_t *ptserve_new_dir(int fd, const char *path) {
+	ptserve_t *ptserve = ptserve_new();
+	int rootfd = openat(fd, path, O_RDONLY | O_DIRECTORY);
+	if(ptserve == NULL || (ptserve->rootfd = rootfd) < 0) {
+		free(ptserve);
+		return NULL;
+	}
+	ptserve->response_cb = ptserve_cb_dir;
+	return ptserve;
+}
+
+ptserve_t *ptserve_new_cb(int fd, ptserve_response_cb_t *cb, void *data) {
+	ptserve_t *ptserve = ptserve_new();
+	if(ptserve == NULL) {
+		free(ptserve);
+		return NULL;
+	}
+	ptserve->rootfd = fd;
+	ptserve->response_cb = cb;
+	ptserve->data = data;
+	return ptserve;
+}
+
+ptserve_t *ptserve_serve_dirat(int fd, const char *path) {
 	ptserve_t *ptserve = ptserve_new_dir(fd, path);
 	ptserve_listen(ptserve);
 	ptserve_serve(ptserve);
 	return ptserve;
 }
+
+/*****************************************************************************
+ * tests
+ ****************************************************************************/
 
 void ptserve_set_proxy(ptserve_t *ptserve) {
 	setenv("http_proxy", ptserve->url, 1);
