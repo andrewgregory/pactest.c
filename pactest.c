@@ -108,12 +108,23 @@ void _pt_pkg_free(pt_pkg_t *pkg) {
     alpm_list_free_inner(pkg->files, (alpm_list_fn_free) _pt_pkg_file_free);
     alpm_list_free(pkg->files);
     free(pkg->name);
+    free(pkg->version);
     free(pkg);
 }
 
 /******************************************
  * file system utilities
  ******************************************/
+
+char *pt_path(pt_env_t *pt, const char *path) {
+    static char fullpath[PATH_MAX];
+    if(path[0] == '/') {
+        strcpy(fullpath, path);
+    } else {
+        snprintf(fullpath, PATH_MAX, "%s/%s", pt->root, path);
+    }
+    return fullpath;
+}
 
 void pt_rmrfat(int dd, const char *path) {
     if(!unlinkat(dd, path, 0)) {
@@ -239,7 +250,7 @@ pt_env_t *pt_new(const char *dbpath) {
     if((pt = calloc(sizeof(pt_env_t), 1)) == NULL) { return NULL; }
     pt->root = strdup(root);
     pt->rootfd = open(pt->root, O_DIRECTORY);
-    pt->dbpath = strdup(dbpath);
+    pt->dbpath = strdup(pt_path(pt, dbpath));
     pt_mkdirat(pt->rootfd, 0700, pt->dbpath);
     pt->dbfd = openat(pt->rootfd, pt->dbpath, O_DIRECTORY);
     pt_writeat(pt->dbfd, "local/ALPM_DB_VERSION", "9");
@@ -338,6 +349,11 @@ int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
     return 0;
 }
 
+int pt_db_add_pkg(pt_db_t *db, pt_pkg_t *pkg) {
+    db->pkgs = alpm_list_add(db->pkgs, pkg);
+    return 1;
+}
+
 int _pt_fwrite_dbentry(FILE *f, const char *section, const char *value) {
     if(value == NULL) { return 0; }
     return fprintf(f, "%%%s%%\n%s\n\n", section, value);
@@ -352,28 +368,23 @@ void _pt_fwrite_dblist(FILE *f, const char *section, alpm_list_t *values) {
     fputc('\n', f);
 }
 
-int pt_install_db(pt_env_t *pt, pt_db_t *db) {
+int pt_db_writeat(int dd, const char *path, pt_db_t *db) {
     alpm_list_t *i;
     struct archive *a = archive_write_new();
     struct archive_entry *e = archive_entry_new();
-    char path[PATH_MAX];
-    int fd;
-
-    pt_mkdirat(pt->dbfd, 0755, "sync");
-    sprintf(path, "sync/%s.db", db->name);
-    fd = openat(pt->dbfd, path, O_CREAT | O_WRONLY, 0644);
+    int fd = openat(dd, path, O_CREAT | O_WRONLY, 0644);
 
     archive_write_set_format_ustar(a);
     archive_write_open_fd(a, fd);
     for(i = db->pkgs; i; i = i->next) {
         pt_pkg_t *pkg = i->data;
         size_t buflen = 0;
-        char *buf;
+        char *buf, ppath[PATH_MAX];
         FILE *f;
 
-        sprintf(path, "%s-%s/", pkg->name, pkg->version);
+        sprintf(ppath, "%s-%s/", pkg->name, pkg->version);
         archive_entry_clear(e);
-        archive_entry_set_pathname(e, path);
+        archive_entry_set_pathname(e, ppath);
         archive_entry_set_filetype(e, AE_IFDIR);
         archive_entry_set_perm(e, 0755);
         archive_write_header(a, e);
@@ -387,9 +398,9 @@ int pt_install_db(pt_env_t *pt, pt_db_t *db) {
         _pt_fwrite_dblist(f, "CHECKDEPENDS", pkg->checkdepends);
         fclose(f);
 
-        sprintf(path, "%s-%s/depends", pkg->name, pkg->version);
+        sprintf(ppath, "%s-%s/depends", pkg->name, pkg->version);
         archive_entry_clear(e);
-        archive_entry_set_pathname(e, path);
+        archive_entry_set_pathname(e, ppath);
         archive_entry_set_filetype(e, AE_IFREG);
         archive_entry_set_perm(e, 0644);
         archive_entry_set_size(e, buflen);
@@ -405,13 +416,13 @@ int pt_install_db(pt_env_t *pt, pt_db_t *db) {
         _pt_fwrite_dbentry(f, "VERSION", pkg->version);
         _pt_fwrite_dbentry(f, "DESC", pkg->desc);
         _pt_fwrite_dblist(f, "GROUPS", pkg->groups);
-        _pt_fwrite_dbentry(f, "CSIZE", "200");
+        _pt_fwrite_dbentry(f, "CSIZE", "2048");
         _pt_fwrite_dbentry(f, "ISIZE", pkg->isize);
         fclose(f);
 
-        sprintf(path, "%s-%s/desc", pkg->name, pkg->version);
+        sprintf(ppath, "%s-%s/desc", pkg->name, pkg->version);
         archive_entry_clear(e);
-        archive_entry_set_pathname(e, path);
+        archive_entry_set_pathname(e, ppath);
         archive_entry_set_filetype(e, AE_IFREG);
         archive_entry_set_perm(e, 0644);
         archive_entry_set_size(e, buflen);
@@ -424,6 +435,13 @@ int pt_install_db(pt_env_t *pt, pt_db_t *db) {
     archive_write_free(a);
     close(fd);
     return 0;
+}
+
+int pt_install_db(pt_env_t *pt, pt_db_t *db) {
+    char path[PATH_MAX];
+    pt_mkdirat(pt->dbfd, 0755, "sync");
+    sprintf(path, "sync/%s.db", db->name);
+    return pt_db_writeat(pt->dbfd, path, db);
 }
 
 int pt_add_pkg_to_localdb(pt_env_t *pt, pt_pkg_t *pkg) {
@@ -648,6 +666,40 @@ int pt_fexecve(int fd, char *const argv[], char *const envp[],
 
 #undef _PT_CLOSE
 #undef _PT_DUP
+}
+
+/*****************************************
+ * ALPM helpers
+ *****************************************/
+
+alpm_db_t *pt_alpm_get_db(alpm_handle_t *h, const char *dbname) {
+    alpm_list_t *i;
+    for(i = alpm_get_syncdbs(h); i; i = i->next) {
+        if(strcmp(alpm_db_get_name(i->data), dbname) == 0) { return i->data; }
+    }
+    return NULL;
+}
+
+alpm_pkg_t *pt_alpm_get_pkg(alpm_handle_t *h, const char *pkgname) {
+    char *c = strchr(pkgname, '/');
+    if(c && strncmp(pkgname, "local", c - pkgname) == 0) {
+        alpm_db_t *db = alpm_get_localdb(h);
+        return alpm_db_get_pkg(db, c + 1);
+    } else if(c) {
+        alpm_list_t *i;
+        for(i = alpm_get_syncdbs(h); i; i = i->next) {
+            if(strncmp(alpm_db_get_name(i->data), pkgname, c - pkgname) == 0) {
+                return alpm_db_get_pkg(i->data, c + 1);
+            }
+        }
+    } else {
+        alpm_list_t *i;
+        for(i = alpm_get_syncdbs(h); i; i = i->next) {
+            alpm_pkg_t *p = alpm_db_get_pkg(i->data, pkgname);
+            if(p) { return p; }
+        }
+    }
+    return NULL;
 }
 
 /*****************************************

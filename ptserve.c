@@ -29,6 +29,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -52,8 +53,9 @@ typedef struct ptserve_t {
 	char *url;
 	void *data;
 	int rootfd;
-	pid_t _pid;
 	int sd_server;
+	pid_t _pid;
+	pthread_t _tid;
 } ptserve_t;
 
 /*****************************************************************************
@@ -61,8 +63,12 @@ typedef struct ptserve_t {
  ****************************************************************************/
 
 static int _vasprintf(char **strp, const char *fmt, va_list args) {
-	size_t len = vsnprintf(NULL, 0, fmt, args);
-	if((*strp = malloc(len + 1)) != NULL) { return vsprintf(*strp, fmt, args); }
+	va_list arg_cp;
+	size_t len;
+	va_copy(arg_cp, args);
+	len = vsnprintf(NULL, 0, fmt, arg_cp);
+	va_end(arg_cp);
+	if((*strp = malloc(len + 2)) != NULL) { return vsprintf(*strp, fmt, args); }
 	else { return -1; }
 }
 
@@ -204,13 +210,18 @@ ptserve_t *ptserve_new() {
 	if(ptserve == NULL) { return NULL; }
 	ptserve->rootfd = AT_FDCWD;
 	ptserve->sd_server = -1;
+	ptserve->_tid = -1;
 	return ptserve;
 }
 
 void ptserve_free(ptserve_t *ptserve) {
 	if(ptserve == NULL) { return; }
-	kill(ptserve->_pid, SIGTERM);
-	waitpid(ptserve->_pid, NULL, 0);
+	/* kill(ptserve->_pid, SIGTERM); */
+	/* waitpid(ptserve->_pid, NULL, 0); */
+	/* if(ptserve->_tid != -1) { */
+	/* 	pthread_kill(ptserve->_tid, SIGINT); */
+	/* 	pthread_join(ptserve->_tid, NULL); */
+	/* } */
 	free(ptserve->url);
 	free(ptserve);
 }
@@ -233,14 +244,15 @@ void ptserve_listen(ptserve_t *ptserve) {
 	listen(ptserve->sd_server, SOMAXCONN);
 
 	ptserve->port = ntohs(sin.sin_port);
-	_asprintf(&ptserve->url, "http://127.0.0.1:%d", ptserve->port);
+	_asprintf(&(ptserve->url), "http://127.0.0.1:%d", ptserve->port);
 }
 
 int ptserve_accept(ptserve_t *ptserve) {
 	return accept(ptserve->sd_server, 0, 0);
 }
 
-void *ptserve_serve(ptserve_t *ptserve) {
+void *ptserve_serve(void *arg) {
+	ptserve_t *ptserve = arg;
 	int session_fd;
 	ptserve_listen(ptserve);
 	while((session_fd = ptserve_accept(ptserve)) >= 0) {
@@ -317,7 +329,8 @@ ptserve_t *ptserve_serve_dirat(int fd, const char *path) {
 		return NULL;
 	}
 	ptserve->response_cb = ptserve_cb_dir;
-	ptserve_serve(ptserve);
+	ptserve_listen(ptserve);
+	pthread_create(&ptserve->_tid, NULL, ptserve_serve, ptserve);
 	return ptserve;
 }
 
@@ -332,7 +345,7 @@ ptserve_t *ptserve_serve_dir(const char *path) {
 void ptserve_set_proxy(ptserve_t *ptserve) {
 	setenv("http_proxy", ptserve->url, 1);
 }
-
+#if 0
 int main(int argc, char *argv[]) {
 	ptserve_t *ptserve = ptserve_serve_cbat(AT_FDCWD, ptserve_cb_dir, NULL);
 	ptserve_listen(ptserve);
@@ -353,6 +366,7 @@ int main_nocb(int argc, char *argv[]) {
 	}
 	ptserve_free(ptserve);
 }
+#endif
 
 #endif /* PTSERVE_C */
 
