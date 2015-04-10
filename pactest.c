@@ -161,20 +161,29 @@ void pt_rmrfat(int dd, const char *path) {
 }
 
 int pt_mkdirat(int dd, int mode, const char *path) {
-    char *dir = strdup(path);
-    char p[PATH_MAX] = "";
-    char *c;
-    int ret = 0;
-    if(dir[0] == '/') { strcat(p, "/"); }
-    for(c = strtok(dir, "/"); c; c = strtok(NULL, "/")) {
-        struct stat buf;
-        strcat(p, c);
-        strcat(p, "/");
-        if(fstatat(dd, p, &buf, 0) == 0) { continue; }
-        if((ret = mkdirat(dd, p, mode)) != 0) { break; }
+    struct stat buf;
+    char dir[PATH_MAX], *c = dir;
+    if(strlen(path) > PATH_MAX) { errno = ENAMETOOLONG; return -1; }
+    strcpy(dir, path);
+    while((c = strchr(c + 1, '/'))) {
+        *c = '\0';
+        if(fstatat(dd, dir, &buf, 0) != 0 && mkdirat(dd, dir, mode) != 0) {
+            return -1;
+        }
+        *c = '/';
     }
-    free(dir);
-    return ret;
+    return 0;
+}
+
+int pt_mkpdirat(int dd, int mode, const char *path) {
+    char *c;
+    if((c = strrchr(path, '/'))) {
+        char dir[PATH_MAX] = "";
+        if(c - path + 1 > PATH_MAX) { errno = ENAMETOOLONG; return -1; }
+        strncat(dir, path, c - path + 1);
+        return pt_mkdirat(dd, mode, dir);
+    }
+    return 0;
 }
 
 int pt_grepat(int dd, const char *path, const char *needle) {
@@ -191,23 +200,13 @@ int pt_grepat(int dd, const char *path, const char *needle) {
 }
 
 int pt_symlinkat(int dd, const char *path, const char *target) {
-    char *c;
-    if((c = strrchr(path, '/'))) {
-        char *dir = strndup(path, c - path);
-        pt_mkdirat(dd, 0700, dir);
-        free(dir);
-    }
+    pt_mkpdirat(dd, 0700, path);
     return symlinkat(target, dd, path);
 }
 
 int pt_writeat(int dd, const char *path, const char *contents) {
     int fd, flags = O_CREAT | O_WRONLY | O_TRUNC;
-    char *c;
-    if((c = strrchr(path, '/'))) {
-        char *dir = strndup(path, c - path);
-        pt_mkdirat(dd, 0700, dir);
-        free(dir);
-    }
+    pt_mkpdirat(dd, 0700, path);
     if((fd = openat(dd, path, flags, 0644)) == -1) {
         return -1;
     }
@@ -281,11 +280,7 @@ int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
     int fd = openat(dd, path, O_CREAT | O_WRONLY, 0644);;
     char *c;
 
-    if((c = strrchr(path, '/'))) {
-        char *dir = strndup(path, c - path);
-        pt_mkdirat(dd, 0755, dir);
-        free(dir);
-    }
+    pt_mkpdirat(dd, 0700, path);
 
     if((c = strrchr(path, '.'))) {
         if(strcmp(c, ".bz2") == 0) {
@@ -642,21 +637,18 @@ int pt_fexecve(int fd, char *const argv[], char *const envp[],
 
             if(waitpid(pid, &status, WNOHANG) != 0) {
                 /* slurp any remaining input and break */
-                if(out) {
-                    while((r = read(opipe[0], buf, LINE_MAX - 1)) > 0) {
-                        buf[r] = '\0';
-                        fputs(buf, out);
-                    }
+                while(out && (r = read(epipe[0], buf, LINE_MAX)) > 0) {
+                    if(fwrite(buf, 1, r, out) == 0) { out = NULL; }
                 }
-                if(err) {
-                    while((r = read(epipe[0], buf, LINE_MAX - 1)) > 0) {
-                        buf[r] = '\0';
-                        fputs(buf, err);
-                    }
+                while(err && (r = read(epipe[0], buf, LINE_MAX)) > 0) {
+                    if(fwrite(buf, 1, r, err) == 0) { err = NULL; }
                 }
                 break;
             }
         }
+
+        if(obak) { fflush(obak); }
+        if(ebak) { fflush(ebak); }
 
         _PT_CLOSE(opipe[0]);
         _PT_CLOSE(epipe[0]);
