@@ -116,6 +116,14 @@ void _pt_pkg_free(pt_pkg_t *pkg) {
  * file system utilities
  ******************************************/
 
+void _pt_path(pt_env_t *pt, char *dest, const char *path) {
+    if(path[0] == '/') {
+        strcpy(dest, path);
+    } else {
+        snprintf(dest, PATH_MAX, "%s/%s", pt->root, path);
+    }
+}
+
 char *pt_path(pt_env_t *pt, const char *path) {
     static char fullpath[PATH_MAX];
     if(path[0] == '/') {
@@ -262,42 +270,12 @@ alpm_handle_t *pt_initialize(pt_env_t *pt, alpm_errno_t *err) {
     return pt->handle;
 }
 
-void _pt_path(pt_env_t *pt, char *dest, const char *path) {
-    if(path[0] == '/') {
-        strcpy(dest, path);
-    } else {
-        snprintf(dest, PATH_MAX, "%s/%s", pt->root, path);
-    }
-}
-
-int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
+int _pt_pkg_write_archive(pt_pkg_t *pkg, struct archive *a) {
     alpm_list_t *i;
+    FILE *contents;
+    struct archive_entry *e;
     char *buf;
     size_t buflen;
-    FILE *contents;
-    struct archive *a = archive_write_new();
-    struct archive_entry *e;
-    int fd = openat(dd, path, O_CREAT | O_WRONLY, 0644);;
-    char *c;
-
-    pt_mkpdirat(dd, 0700, path);
-
-    if((c = strrchr(path, '.'))) {
-        if(strcmp(c, ".bz2") == 0) {
-            archive_write_add_filter_bzip2(a);
-        } else if(strcmp(c, ".gz") == 0) {
-            archive_write_add_filter_gzip(a);
-        } else if(strcmp(c, ".xz") == 0) {
-            archive_write_add_filter_xz(a);
-        } else if(strcmp(c, ".lz") == 0) {
-            archive_write_add_filter_lzip(a);
-        } else if(strcmp(c, ".Z") == 0) {
-            archive_write_add_filter_compress(a);
-        }
-    }
-
-    archive_write_set_format_ustar(a);
-    archive_write_open_fd(a, fd);
 
     contents = open_memstream(&buf, &buflen);
     fprintf(contents, "%s = %s\n", "pkgname", pkg->name);
@@ -339,7 +317,40 @@ int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
     }
 
     archive_entry_free(e);
+    return 1;
+}
+
+int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
+    struct archive *a = archive_write_new();
+    char *c;
+    int fd = openat(dd, path, O_CREAT | O_WRONLY, 0644);;
+    struct stat sbuf;
+
+    pt_mkpdirat(dd, 0700, path);
+
+    if((c = strrchr(pkg->filename, '.'))) {
+        if(strcmp(c, ".bz2") == 0) {
+            archive_write_add_filter_bzip2(a);
+        } else if(strcmp(c, ".gz") == 0) {
+            archive_write_add_filter_gzip(a);
+        } else if(strcmp(c, ".xz") == 0) {
+            archive_write_add_filter_xz(a);
+        } else if(strcmp(c, ".lz") == 0) {
+            archive_write_add_filter_lzip(a);
+        } else if(strcmp(c, ".Z") == 0) {
+            archive_write_add_filter_compress(a);
+        }
+    }
+
+    archive_write_set_format_ustar(a);
+    archive_write_open_fd(a, fd);
+    _pt_pkg_write_archive(pkg, a);
     archive_write_free(a);
+    if(pkg->csize == NULL && fstat(fd, &sbuf) == 0) {
+        int len = snprintf(NULL, 0, "%zd", sbuf.st_size);
+        pkg->csize = malloc(len + 1);
+        sprintf(pkg->csize, "%zd", sbuf.st_size);
+    }
     close(fd);
     return 0;
 }
@@ -410,9 +421,9 @@ int pt_db_writeat(int dd, const char *path, pt_db_t *db) {
         _pt_fwrite_dbentry(f, "BASE", pkg->base);
         _pt_fwrite_dbentry(f, "VERSION", pkg->version);
         _pt_fwrite_dbentry(f, "DESC", pkg->desc);
-        _pt_fwrite_dblist(f, "GROUPS", pkg->groups);
-        _pt_fwrite_dbentry(f, "CSIZE", "2048");
+        _pt_fwrite_dbentry(f, "CSIZE", pkg->csize);
         _pt_fwrite_dbentry(f, "ISIZE", pkg->isize);
+        _pt_fwrite_dblist(f, "GROUPS", pkg->groups);
         fclose(f);
 
         sprintf(ppath, "%s-%s/desc", pkg->name, pkg->version);
@@ -646,9 +657,6 @@ int pt_fexecve(int fd, char *const argv[], char *const envp[],
                 break;
             }
         }
-
-        if(obak) { fflush(obak); }
-        if(ebak) { fflush(ebak); }
 
         _PT_CLOSE(opipe[0]);
         _PT_CLOSE(epipe[0]);
