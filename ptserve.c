@@ -218,10 +218,11 @@ void ptserve_free(ptserve_t *ptserve) {
 	if(ptserve == NULL) { return; }
 	/* kill(ptserve->_pid, SIGTERM); */
 	/* waitpid(ptserve->_pid, NULL, 0); */
-	/* if(ptserve->_tid != -1) { */
+	if(ptserve->_tid != -1) {
+		pthread_cancel(ptserve->_tid);
 	/* 	pthread_kill(ptserve->_tid, SIGINT); */
 	/* 	pthread_join(ptserve->_tid, NULL); */
-	/* } */
+	}
 	free(ptserve->url);
 	free(ptserve);
 }
@@ -331,6 +332,7 @@ ptserve_t *ptserve_serve_dirat(int fd, const char *path) {
 	ptserve->response_cb = ptserve_cb_dir;
 	ptserve_listen(ptserve);
 	pthread_create(&ptserve->_tid, NULL, ptserve_serve, ptserve);
+	pthread_detach(ptserve->_tid);
 	return ptserve;
 }
 
