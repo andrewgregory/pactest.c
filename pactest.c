@@ -25,7 +25,7 @@
 #ifndef PACTEST_C
 #define PACTEST_C
 
-#define PACTEST_C_VERSION 0.1
+#define PACTEST_C_VERSION "0.1"
 
 #include <dirent.h>
 #include <errno.h>
@@ -107,7 +107,27 @@ void _pt_pkg_free(pt_pkg_t *pkg) {
     if(pkg == NULL) { return; }
     alpm_list_free_inner(pkg->files, (alpm_list_fn_free) _pt_pkg_file_free);
     alpm_list_free(pkg->files);
+    FREELIST(pkg->backup);
+    FREELIST(pkg->checkdepends);
+    FREELIST(pkg->conflicts);
+    FREELIST(pkg->depends);
+    FREELIST(pkg->groups);
+    FREELIST(pkg->licenses);
+    FREELIST(pkg->makedepends);
+    FREELIST(pkg->optdepends);
+    FREELIST(pkg->provides);
+    FREELIST(pkg->replaces);
+    free(pkg->arch);
+    free(pkg->base);
+    free(pkg->builddate);
+    free(pkg->csize);
+    free(pkg->desc);
+    free(pkg->filename);
+    free(pkg->installdate);
+    free(pkg->isize);
     free(pkg->name);
+    free(pkg->packager);
+    free(pkg->scriptlet);
     free(pkg->version);
     free(pkg);
 }
@@ -115,6 +135,26 @@ void _pt_pkg_free(pt_pkg_t *pkg) {
 /******************************************
  * file system utilities
  ******************************************/
+
+static char *pt_vasprintf(const char *fmt, va_list args) {
+	va_list arg_cp;
+	size_t len;
+    char *ret;
+	va_copy(arg_cp, args);
+	len = vsnprintf(NULL, 0, fmt, arg_cp);
+	va_end(arg_cp);
+	if((ret = malloc(len + 2)) != NULL) { vsprintf(ret, fmt, args); }
+    return ret;
+}
+
+static char *pt_asprintf(const char *fmt, ...) {
+	va_list args;
+	char *ret;
+	va_start(args, fmt);
+	ret = pt_vasprintf(fmt, args);
+	va_end(args);
+	return ret;
+}
 
 void _pt_path(pt_env_t *pt, char *dest, const char *path) {
     if(path[0] == '/') {
@@ -175,12 +215,14 @@ int pt_mkdirat(int dd, int mode, const char *path) {
     strcpy(dir, path);
     while((c = strchr(c + 1, '/'))) {
         *c = '\0';
-        if(fstatat(dd, dir, &buf, 0) != 0 && mkdirat(dd, dir, mode) != 0) {
-            return -1;
+        if(fstatat(dd, dir, &buf, 0) == 0) {
+            if(S_ISDIR(buf.st_mode)) { *c = '/'; continue; }
+            else { return -1; }
         }
+        if(mkdirat(dd, dir, mode) != 0) { return -1; }
         *c = '/';
     }
-    return 0;
+    return mkdirat(dd, path, mode);
 }
 
 int pt_mkpdirat(int dd, int mode, const char *path) {
@@ -360,13 +402,18 @@ int pt_db_add_pkg(pt_db_t *db, pt_pkg_t *pkg) {
     return 1;
 }
 
-int _pt_fwrite_dbentry(FILE *f, const char *section, const char *value) {
-    if(value == NULL) { return 0; }
-    return fprintf(f, "%%%s%%\n%s\n\n", section, value);
+int _pt_fwrite_dbheader(FILE *f, const char *header) {
+    return fprintf(f, "%%" "%s" "%%" "\n", header);
+}
+
+void _pt_fwrite_dbentry(FILE *f, const char *section, const char *value) {
+    if(value == NULL) { return; }
+    _pt_fwrite_dbheader(f, section);
+    fprintf(f, "%s\n\n", value);
 }
 
 void _pt_fwrite_dblist(FILE *f, const char *section, alpm_list_t *values) {
-    fprintf(f, "%%%s%%\n", section);
+    _pt_fwrite_dbheader(f, section);
     while(values) {
         fprintf(f, "%s\n", (char *) values->data);
         values = values->next;
@@ -464,14 +511,15 @@ int pt_add_pkg_to_localdb(pt_env_t *pt, pt_pkg_t *pkg) {
     snprintf(path, PATH_MAX, "local/%s-%s/files", pkg->name, pkg->version);
     fd = openat(pt->dbfd, path, O_CREAT | O_WRONLY, 0644);
     f = fdopen(fd, "w");
-    fprintf(f, "%%%s%%\n", "FILES");
+    _pt_fwrite_dbheader(f, "FILES");
     for(i = pkg->files; i; i = i->next) {
         /* TODO: fill in parent directories? */
         pt_pkg_file_t *file = i->data;
         fprintf(f, "%s\n", file->path);
     }
     fputc('\n', f);
-    fprintf(f, "%%%s%%\n", "BACKUP");
+
+    _pt_fwrite_dbheader(f, "BACKUP");
     for(i = pkg->backup; i; i = i->next) {
         pt_pkg_file_t *file = i->data;
         fprintf(f, "%s\n", file->path);
@@ -497,6 +545,12 @@ int pt_add_pkg_to_localdb(pt_env_t *pt, pt_pkg_t *pkg) {
     _pt_fwrite_dblist(f, "MAKEDEPENDS", pkg->makedepends);
     _pt_fwrite_dblist(f, "CHECKDEPENDS", pkg->checkdepends);
     fclose(f);
+
+    if(pkg->scriptlet) {
+        snprintf(path, PATH_MAX, "local/%s-%s/install", pkg->name, pkg->version);
+        fd = openat(pt->dbfd, path, O_CREAT | O_WRONLY, 0644);
+        write(fd, pkg->scriptlet, strlen(pkg->scriptlet));
+    }
 
     return 0;
 }
@@ -574,6 +628,8 @@ pt_pkg_t *pt_pkg_new(pt_env_t *pt, const char *pkgname, const char *pkgver) {
     pt_pkg_t *pkg = calloc(sizeof(pt_pkg_t), 1);
     pkg->name = strdup(pkgname);
     pkg->version = strdup(pkgver);
+    pkg->arch = strdup("any");
+    pkg->filename = pt_asprintf("%s-%s.pkg.tar", pkg->name, pkg->version);
     pt->pkgs = alpm_list_add(pt->pkgs, pkg);
     return pkg;
 }

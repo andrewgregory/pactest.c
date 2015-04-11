@@ -252,8 +252,7 @@ int ptserve_accept(ptserve_t *ptserve) {
 	return accept(ptserve->sd_server, 0, 0);
 }
 
-void *ptserve_serve(void *arg) {
-	ptserve_t *ptserve = arg;
+void *ptserve_serve(ptserve_t *ptserve) {
 	int session_fd;
 	ptserve_listen(ptserve);
 	while((session_fd = ptserve_accept(ptserve)) >= 0) {
@@ -331,7 +330,7 @@ ptserve_t *ptserve_serve_dirat(int fd, const char *path) {
 	}
 	ptserve->response_cb = ptserve_cb_dir;
 	ptserve_listen(ptserve);
-	pthread_create(&ptserve->_tid, NULL, ptserve_serve, ptserve);
+	pthread_create(&ptserve->_tid, NULL, (void* (*)(void*)) ptserve_serve, ptserve);
 	pthread_detach(ptserve->_tid);
 	return ptserve;
 }
