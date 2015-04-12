@@ -208,6 +208,7 @@ void pt_rmrfat(int dd, const char *path) {
     }
 }
 
+/* TODO: cleanup pt_mkdirat */
 int pt_mkdirat(int dd, int mode, const char *path) {
     struct stat buf;
     char dir[PATH_MAX], *c = dir;
@@ -222,7 +223,7 @@ int pt_mkdirat(int dd, int mode, const char *path) {
         if(mkdirat(dd, dir, mode) != 0) { return -1; }
         *c = '/';
     }
-    return mkdirat(dd, path, mode);
+    return mkdirat(dd, path, mode) || errno != EEXIST;
 }
 
 int pt_mkpdirat(int dd, int mode, const char *path) {
@@ -309,6 +310,7 @@ pt_env_t *pt_new(const char *dbpath) {
 alpm_handle_t *pt_initialize(pt_env_t *pt, alpm_errno_t *err) {
     if(err) { *err = 0; }
     pt->handle = alpm_initialize(pt->root, pt->dbpath, err);
+    alpm_option_add_cachedir(pt->handle, pt_path(pt, "var/cache/pacman/pkg"));
     return pt->handle;
 }
 
@@ -389,9 +391,7 @@ int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
     _pt_pkg_write_archive(pkg, a);
     archive_write_free(a);
     if(pkg->csize == NULL && fstat(fd, &sbuf) == 0) {
-        int len = snprintf(NULL, 0, "%zd", sbuf.st_size);
-        pkg->csize = malloc(len + 1);
-        sprintf(pkg->csize, "%zd", sbuf.st_size);
+        pkg->csize = pt_asprintf("%zd", sbuf.st_size);
     }
     close(fd);
     return 0;
