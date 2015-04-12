@@ -1,0 +1,14 @@
+#!/bin/sh
+
+cmd=""
+while getopts cglrv name; do
+  case $name in
+    c) cmd="fakechroot $cmd";;
+    g) cmd="gdb $cmd";;
+    l) cmd="libtool execute $cmd";;
+    r) cmd="fakeroot $cmd";;
+    v) cmd="valgrind --log-file=/dev/null --leak-check=full --error-exitcode=1 $cmd";;
+  esac
+done
+while (( --OPTIND > 0 )); do shift; done # remove our options from the stack
+$cmd "$@"
