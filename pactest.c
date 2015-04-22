@@ -174,9 +174,9 @@ char *pt_path(pt_env_t *pt, const char *path) {
     return fullpath;
 }
 
-void pt_rmrfat(int dd, const char *path) {
+int pt_rmrfat(int dd, const char *path) {
     if(!unlinkat(dd, path, 0)) {
-        return;
+        return 0;
     } else {
         struct dirent *de;
         DIR *d;
@@ -184,18 +184,18 @@ void pt_rmrfat(int dd, const char *path) {
 
         switch(errno) {
             case ENOENT:
-                return;
+                return 0;
             case EPERM:
             case EISDIR:
                 break;
             default:
                 /* not a directory */
-                return;
+                return 0;
         }
 
         fd = openat(dd, path, O_DIRECTORY);
         d = fdopendir(fd);
-        if(!d) { return; }
+        if(!d) { return 0; }
         for(de = readdir(d); de != NULL; de = readdir(d)) {
             if(strcmp(de->d_name, "..") != 0 && strcmp(de->d_name, ".") != 0) {
                 char name[PATH_MAX];
@@ -206,24 +206,22 @@ void pt_rmrfat(int dd, const char *path) {
         closedir(d);
         unlinkat(dd, path, AT_REMOVEDIR);
     }
+	return 0;
 }
 
 /* TODO: cleanup pt_mkdirat */
 int pt_mkdirat(int dd, int mode, const char *path) {
-    struct stat buf;
     char dir[PATH_MAX], *c = dir;
-    if(strlen(path) > PATH_MAX) { errno = ENAMETOOLONG; return -1; }
+    size_t plen = strlen(path);
+    if(plen > PATH_MAX) { errno = ENAMETOOLONG; return -1; }
     strcpy(dir, path);
+    while(dir[plen - 1] == '/') { dir[--plen] = '\0'; }
     while((c = strchr(c + 1, '/'))) {
         *c = '\0';
-        if(fstatat(dd, dir, &buf, 0) == 0) {
-            if(S_ISDIR(buf.st_mode)) { *c = '/'; continue; }
-            else { return -1; }
-        }
-        if(mkdirat(dd, dir, mode) != 0) { return -1; }
+        if(mkdirat(dd, dir, mode) != 0 && errno != EEXIST) { return -1; }
         *c = '/';
     }
-    return mkdirat(dd, path, mode) || errno != EEXIST;
+    return mkdirat(dd, path, mode);
 }
 
 int pt_mkpdirat(int dd, int mode, const char *path) {
@@ -242,7 +240,7 @@ int pt_grepat(int dd, const char *path, const char *needle) {
     char buf[LINE_MAX];
     FILE *f;
     if((fd = openat(dd, path, O_RDONLY)) == -1) { return 0; }
-    if((f = fdopen(fd, "r")) == NULL) { return 0; }
+    if((f = fdopen(fd, "r")) == NULL) { close(fd); return 0; }
     while(fgets(buf, sizeof(buf), f)) {
         if(strstr(buf, needle)) { fclose(f); return 1; }
     }
@@ -256,14 +254,14 @@ int pt_symlinkat(int dd, const char *path, const char *target) {
 }
 
 int pt_writeat(int dd, const char *path, const char *contents) {
-    int fd, flags = O_CREAT | O_WRONLY | O_TRUNC;
+    int fd, ret, flags = O_CREAT | O_WRONLY | O_TRUNC;
     pt_mkpdirat(dd, 0700, path);
     if((fd = openat(dd, path, flags, 0644)) == -1) {
         return -1;
     }
-    write(fd, contents, strlen(contents));
+    ret = write(fd, contents, strlen(contents));
     close(fd);
-    return 0;
+    return ret;
 }
 
 FILE *pt_fopenat(int dirfd, const char *path, const char *mode) {
@@ -292,25 +290,55 @@ FILE *pt_fopenat(int dirfd, const char *path, const char *mode) {
  * environment creation
  ******************************************/
 
+void pt_cleanup(pt_env_t *pt) {
+    if(pt == NULL) { return; }
+    close(pt->rootfd);
+    if(!getenv("PT_KEEP_ROOT")) { pt_rmrfat(AT_FDCWD, pt->root); }
+    else { fprintf(stderr, "root: %s\n", pt->root); }
+    free(pt->root);
+    free(pt->dbpath);
+    alpm_release(pt->handle);
+    alpm_list_free_inner(pt->dbs, (alpm_list_fn_free)_pt_db_free);
+    alpm_list_free_inner(pt->pkgs, (alpm_list_fn_free)_pt_pkg_free);
+    alpm_list_free(pt->dbs);
+    alpm_list_free(pt->pkgs);
+    free(pt);
+}
+
 pt_env_t *pt_new(const char *dbpath) {
-    pt_env_t *pt;
+    pt_env_t *pt = NULL;
     char root[] = "/tmp/pactest-XXXXXX";
     if(dbpath == NULL) { dbpath = "var/lib/pacman/"; }
     if(mkdtemp(root) == NULL) { return NULL; }
-    if((pt = calloc(sizeof(pt_env_t), 1)) == NULL) { return NULL; }
-    pt->root = strdup(root);
-    pt->rootfd = open(pt->root, O_DIRECTORY);
-    pt->dbpath = strdup(pt_path(pt, dbpath));
-    pt_mkdirat(pt->rootfd, 0700, pt->dbpath);
-    pt->dbfd = openat(pt->rootfd, pt->dbpath, O_DIRECTORY);
-    pt_writeat(pt->dbfd, "local/ALPM_DB_VERSION", "9");
+    if((pt = calloc(sizeof(pt_env_t), 1)) == NULL) { pt_rmrfat(AT_FDCWD, root); return NULL; }
+    if((pt->root = strdup(root)) == NULL) { goto error; }
+    if((pt->rootfd = open(pt->root, O_DIRECTORY)) < 0) { goto error; }
+    if((pt->dbpath = strdup(pt_path(pt, dbpath))) == NULL) { goto error; }
+    if(pt_mkdirat(pt->rootfd, 0777, pt->dbpath) != 0) { goto error; }
+    if((pt->dbfd = openat(pt->rootfd, pt->dbpath, O_DIRECTORY)) < 0) { goto error; }
+    if(pt_writeat(pt->dbfd, "local/ALPM_DB_VERSION", "9") < 0) { goto error; }
+
     return pt;
+error:
+    pt_cleanup(pt);
+    return NULL;
+}
+
+void pt_log_cb(alpm_loglevel_t level, const char *fmt, va_list args) {
+    switch(level) {
+        case ALPM_LOG_DEBUG: fputs("alpm (debug): ", stderr); break;
+        case ALPM_LOG_ERROR: fputs("alpm (error): ", stderr); break;
+        case ALPM_LOG_FUNCTION: fputs("alpm (function): ", stderr); break;
+        case ALPM_LOG_WARNING: fputs("alpm (warning): ", stderr); break;
+    }
+    vfprintf(stderr, fmt, args);
 }
 
 alpm_handle_t *pt_initialize(pt_env_t *pt, alpm_errno_t *err) {
     if(err) { *err = 0; }
-    pt->handle = alpm_initialize(pt->root, pt->dbpath, err);
+    if((pt->handle = alpm_initialize(pt->root, pt->dbpath, err)) == NULL) { return NULL; }
     alpm_option_add_cachedir(pt->handle, pt_path(pt, "var/cache/pacman/pkg"));
+    if(getenv("PT_DEBUG")) { alpm_option_set_logcb(pt->handle, pt_log_cb); }
     return pt->handle;
 }
 
@@ -367,10 +395,11 @@ int _pt_pkg_write_archive(pt_pkg_t *pkg, struct archive *a) {
 int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
     struct archive *a = archive_write_new();
     char *c;
-    int fd = openat(dd, path, O_CREAT | O_WRONLY, 0644);;
+    int fd;
     struct stat sbuf;
 
     pt_mkpdirat(dd, 0700, path);
+    fd = openat(dd, path, O_CREAT | O_WRONLY, 0644);
 
     if((c = strrchr(pkg->filename, '.'))) {
         if(strcmp(c, ".bz2") == 0) {
@@ -603,20 +632,6 @@ int pt_install_pkg(pt_env_t *pt, pt_pkg_t *pkg) {
     return 0;
 }
 
-void pt_cleanup(pt_env_t *pt) {
-    if(pt == NULL) { return; }
-    close(pt->rootfd);
-    pt_rmrfat(AT_FDCWD, pt->root);
-    free(pt->root);
-    free(pt->dbpath);
-    alpm_release(pt->handle);
-    alpm_list_free_inner(pt->dbs, (alpm_list_fn_free)_pt_db_free);
-    alpm_list_free_inner(pt->pkgs, (alpm_list_fn_free)_pt_pkg_free);
-    alpm_list_free(pt->dbs);
-    alpm_list_free(pt->pkgs);
-    free(pt);
-}
-
 pt_db_t *pt_db_new(pt_env_t *pt, const char *dbname) {
     pt_db_t *db = calloc(sizeof(pt_db_t), 1);
     db->name = strdup(dbname);
@@ -728,6 +743,13 @@ int pt_fexecve(int fd, char *const argv[], char *const envp[],
  * ALPM helpers
  *****************************************/
 
+int pt_alpm_set_cachedir(alpm_handle_t *h, const char *path) {
+    alpm_list_t *l = alpm_list_add(NULL, (void*) path);
+    int ret = l != NULL && alpm_option_set_cachedirs(h, l) == 0 ? 0 : -1;
+    alpm_list_free(l);
+    return ret;
+}
+
 alpm_db_t *pt_alpm_get_db(alpm_handle_t *h, const char *dbname) {
     alpm_list_t *i;
     for(i = alpm_get_syncdbs(h); i; i = i->next) {
@@ -761,6 +783,11 @@ alpm_pkg_t *pt_alpm_get_pkg(alpm_handle_t *h, const char *pkgname) {
 /*****************************************
  * Tests
  *****************************************/
+
+int pt_test_file_no_exist(int dirfd, const char *path) {
+    struct stat buf;
+    return fstatat(dirfd, path, &buf, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+}
 
 char *pt_test_pkg_version(pt_env_t *pt, const char *pkgname) {
     static char version[PATH_MAX];

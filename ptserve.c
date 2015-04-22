@@ -216,12 +216,13 @@ ptserve_t *ptserve_new() {
 
 void ptserve_free(ptserve_t *ptserve) {
 	if(ptserve == NULL) { return; }
-	/* kill(ptserve->_pid, SIGTERM); */
-	/* waitpid(ptserve->_pid, NULL, 0); */
-	if(ptserve->_tid != -1) {
+	if(ptserve->_pid > 0) {
+		kill(ptserve->_pid, SIGTERM);
+		waitpid(ptserve->_pid, NULL, 0);
+	} else if(ptserve->_tid != -1) {
 		pthread_cancel(ptserve->_tid);
-	/* 	pthread_kill(ptserve->_tid, SIGINT); */
-	/* 	pthread_join(ptserve->_tid, NULL); */
+		/* pthread_kill(ptserve->_tid, SIGINT); */
+		/* pthread_join(ptserve->_tid, NULL); */
 	}
 	free(ptserve->url);
 	free(ptserve);
@@ -280,6 +281,23 @@ void ptserve_send_file(int socket, int rootfd, const char *path) {
 	close(fd);
 }
 
+void ptserve_send_range(int socket, int rootfd, const char *path, off_t start, off_t len) {
+	struct stat sbuf;
+	ssize_t nread;
+	char buf[128];
+	int fd = openat(rootfd, path, O_RDONLY);
+	lseek(fd, start, SEEK_SET);
+	fstat(fd, &sbuf);
+	if(len > sbuf.st_size - start) { len = sbuf.st_size - start; }
+	_sendf(socket, "HTTP/1.1 200 OK\r\n");
+	_sendf(socket, "Content-Length: %zd\r\n", len);
+	_sendf(socket, "Content-Range: bytes %zd-%zd/%zd\r\n",
+			start, start + len, sbuf.st_size);
+	_sendf(socket, "\r\n");
+	while((nread = read(fd, buf, 128)) > 0 && _send(socket, buf, nread));
+	close(fd);
+}
+
 void ptserve_send_str(int socket, const char *body) {
 	size_t blen = strlen(body);
 	_sendf(socket, "HTTP/1.1 200 OK\r\n");
@@ -290,6 +308,7 @@ void ptserve_send_str(int socket, const char *body) {
 
 void ptserve_cb_dir(ptserve_message_t *request) {
 	char *c, *path = request->path;
+	const char *range_hdr;
 	/* strip protocol and location if present */
 	if((c = strstr(path, "://")) != NULL) {
 		path = c + 3;
@@ -301,7 +320,13 @@ void ptserve_cb_dir(ptserve_message_t *request) {
 	}
 	/* strip leading '/' */
 	if(path[0] == '/') { path++; }
-	ptserve_send_file(request->socket_fd, request->ptserve->rootfd, path);
+	if(range_hdr = ptserve_message_get_header(request, "Range")) {
+		off_t start = 0, len = 0;
+		sscanf(range_hdr, "Range: bytes=%li-%li", &start, &len);
+		ptserve_send_range(request->socket_fd, request->ptserve->rootfd, path, start, len);
+	} else {
+		ptserve_send_file(request->socket_fd, request->ptserve->rootfd, path);
+	}
 }
 
 ptserve_t *ptserve_serve_cbat(int fd, ptserve_response_cb_t *cb, void *data) {
@@ -330,8 +355,12 @@ ptserve_t *ptserve_serve_dirat(int fd, const char *path) {
 	}
 	ptserve->response_cb = ptserve_cb_dir;
 	ptserve_listen(ptserve);
-	pthread_create(&ptserve->_tid, NULL, (void* (*)(void*)) ptserve_serve, ptserve);
-	pthread_detach(ptserve->_tid);
+	/* pthread_create(&ptserve->_tid, NULL, (void* (*)(void*)) ptserve_serve, ptserve); */
+	/* pthread_detach(ptserve->_tid); */
+	ptserve->_pid = fork();
+	if(ptserve->_pid == 0) {
+		ptserve_serve(ptserve);
+	}
 	return ptserve;
 }
 
