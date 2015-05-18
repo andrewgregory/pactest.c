@@ -86,6 +86,7 @@ typedef struct pt_pkg_t {
     char *name;
     char *packager;
     char *scriptlet;
+    char *url;
     char *version;
 } pt_pkg_t;
 
@@ -137,31 +138,27 @@ void _pt_pkg_free(pt_pkg_t *pkg) {
  ******************************************/
 
 static char *pt_vasprintf(const char *fmt, va_list args) {
-	va_list arg_cp;
-	size_t len;
+    va_list arg_cp;
+    size_t len;
     char *ret;
-	va_copy(arg_cp, args);
-	len = vsnprintf(NULL, 0, fmt, arg_cp);
-	va_end(arg_cp);
-	if((ret = malloc(len + 2)) != NULL) { vsprintf(ret, fmt, args); }
+    va_copy(arg_cp, args);
+    len = vsnprintf(NULL, 0, fmt, arg_cp);
+    va_end(arg_cp);
+    if((ret = malloc(len + 2)) != NULL) { vsprintf(ret, fmt, args); }
     return ret;
 }
 
 static char *pt_asprintf(const char *fmt, ...) {
-	va_list args;
-	char *ret;
-	va_start(args, fmt);
-	ret = pt_vasprintf(fmt, args);
-	va_end(args);
-	return ret;
+    va_list args;
+    char *ret;
+    va_start(args, fmt);
+    ret = pt_vasprintf(fmt, args);
+    va_end(args);
+    return ret;
 }
 
-void _pt_path(pt_env_t *pt, char *dest, const char *path) {
-    if(path[0] == '/') {
-        strcpy(dest, path);
-    } else {
-        snprintf(dest, PATH_MAX, "%s/%s", pt->root, path);
-    }
+char *pt_apath(pt_env_t *pt, const char *path) {
+    return *path == '/' ? strdup(path) : pt_asprintf("%s/%s", pt->root, path);
 }
 
 char *pt_path(pt_env_t *pt, const char *path) {
@@ -206,7 +203,7 @@ int pt_rmrfat(int dd, const char *path) {
         closedir(d);
         unlinkat(dd, path, AT_REMOVEDIR);
     }
-	return 0;
+    return 0;
 }
 
 /* TODO: cleanup pt_mkdirat */
@@ -221,7 +218,8 @@ int pt_mkdirat(int dd, int mode, const char *path) {
         if(mkdirat(dd, dir, mode) != 0 && errno != EEXIST) { return -1; }
         *c = '/';
     }
-    return mkdirat(dd, path, mode);
+    if(mkdirat(dd, path, mode) != 0 && errno != EEXIST) { return -1; }
+    return 0;
 }
 
 int pt_mkpdirat(int dd, int mode, const char *path) {
@@ -235,33 +233,19 @@ int pt_mkpdirat(int dd, int mode, const char *path) {
     return 0;
 }
 
-int pt_grepat(int dd, const char *path, const char *needle) {
-    int fd;
-    char buf[LINE_MAX];
-    FILE *f;
-    if((fd = openat(dd, path, O_RDONLY)) == -1) { return 0; }
-    if((f = fdopen(fd, "r")) == NULL) { close(fd); return 0; }
-    while(fgets(buf, sizeof(buf), f)) {
-        if(strstr(buf, needle)) { fclose(f); return 1; }
-    }
-    fclose(f);
-    return 0;
-}
-
 int pt_symlinkat(int dd, const char *path, const char *target) {
     pt_mkpdirat(dd, 0700, path);
     return symlinkat(target, dd, path);
 }
 
 int pt_writeat(int dd, const char *path, const char *contents) {
-    int fd, ret, flags = O_CREAT | O_WRONLY | O_TRUNC;
-    pt_mkpdirat(dd, 0700, path);
-    if((fd = openat(dd, path, flags, 0644)) == -1) {
-        return -1;
-    }
+    int fd, flags = O_CREAT | O_WRONLY | O_TRUNC;
+    ssize_t ret;
+    if(pt_mkpdirat(dd, 0700, path) != 0) { return 0; }
+    if((fd = openat(dd, path, flags, 0644)) == -1) { return 0; }
     ret = write(fd, contents, strlen(contents));
     close(fd);
-    return ret;
+    return ret == strlen(contents);
 }
 
 FILE *pt_fopenat(int dirfd, const char *path, const char *mode) {
@@ -305,23 +289,28 @@ void pt_cleanup(pt_env_t *pt) {
     free(pt);
 }
 
+static int _pt_mktmproot(pt_env_t *pt, const char *path) {
+    char *root = strdup(path);
+    if(root == NULL) { return -1; }
+    if(mkdtemp(root) == NULL) { free(root); return -1; }
+    free(pt->root);
+    pt->root = root;
+    return 0;
+}
+
 pt_env_t *pt_new(const char *dbpath) {
     pt_env_t *pt = NULL;
-    char root[] = "/tmp/pactest-XXXXXX";
-    if(dbpath == NULL) { dbpath = "var/lib/pacman/"; }
-    if(mkdtemp(root) == NULL) { return NULL; }
-    if((pt = calloc(sizeof(pt_env_t), 1)) == NULL) { pt_rmrfat(AT_FDCWD, root); return NULL; }
-    if((pt->root = strdup(root)) == NULL) { goto error; }
-    if((pt->rootfd = open(pt->root, O_DIRECTORY)) < 0) { goto error; }
-    if((pt->dbpath = strdup(pt_path(pt, dbpath))) == NULL) { goto error; }
-    if(pt_mkdirat(pt->rootfd, 0777, pt->dbpath) != 0) { goto error; }
-    if((pt->dbfd = openat(pt->rootfd, pt->dbpath, O_DIRECTORY)) < 0) { goto error; }
-    if(pt_writeat(pt->dbfd, "local/ALPM_DB_VERSION", "9") < 0) { goto error; }
-
+    if(dbpath == NULL) { dbpath = "var/lib/pacman"; }
+#define _PT_ASSERT(x) if(!(x)) { pt_cleanup(pt); return NULL; }
+    _PT_ASSERT(pt = calloc(sizeof(pt_env_t), 1));
+    _PT_ASSERT(_pt_mktmproot(pt, "/tmp/pactest-XXXXXX") == 0);
+    _PT_ASSERT((pt->rootfd = open(pt->root, O_DIRECTORY)) >= 0);
+    _PT_ASSERT(pt->dbpath = pt_apath(pt, dbpath));
+    _PT_ASSERT(pt_mkdirat(pt->rootfd, 0777, pt->dbpath) == 0);
+    _PT_ASSERT((pt->dbfd = openat(pt->rootfd, pt->dbpath, O_DIRECTORY)) >= 0);
+    _PT_ASSERT(pt_writeat(pt->dbfd, "local/ALPM_DB_VERSION", "9") > 0);
+#undef _PT_ASSERT
     return pt;
-error:
-    pt_cleanup(pt);
-    return NULL;
 }
 
 void pt_log_cb(alpm_loglevel_t level, const char *fmt, va_list args) {
@@ -342,6 +331,17 @@ alpm_handle_t *pt_initialize(pt_env_t *pt, alpm_errno_t *err) {
     return pt->handle;
 }
 
+void _pt_fwrite_pkgentry(FILE *f, const char *section, const char *value) {
+    if(value) { fprintf(f, "%s = %s\n", section, value); }
+}
+
+void _pt_fwrite_pkglist(FILE *f, const char *section, alpm_list_t *values) {
+    while(values) {
+        _pt_fwrite_pkgentry(f, section, values->data);
+        values = values->next;
+    }
+}
+
 int _pt_pkg_write_archive(pt_pkg_t *pkg, struct archive *a) {
     alpm_list_t *i;
     FILE *contents;
@@ -350,9 +350,27 @@ int _pt_pkg_write_archive(pt_pkg_t *pkg, struct archive *a) {
     size_t buflen;
 
     contents = open_memstream(&buf, &buflen);
-    fprintf(contents, "%s = %s\n", "pkgname", pkg->name);
-    fprintf(contents, "%s = %s\n", "pkgver", pkg->version);
-    fprintf(contents, "%s = %s\n", "arch", pkg->arch);
+    _pt_fwrite_pkgentry(contents, "pkgname", pkg->name);
+    _pt_fwrite_pkgentry(contents, "pkgver", pkg->version);
+    _pt_fwrite_pkgentry(contents, "pkgdesc", pkg->desc);
+    _pt_fwrite_pkgentry(contents, "url", pkg->url);
+    _pt_fwrite_pkgentry(contents, "builddate", pkg->builddate);
+    _pt_fwrite_pkgentry(contents, "packager", pkg->packager);
+    _pt_fwrite_pkgentry(contents, "arch", pkg->arch);
+    _pt_fwrite_pkgentry(contents, "size", pkg->isize);
+    _pt_fwrite_pkglist(contents, "group", pkg->groups);
+    _pt_fwrite_pkglist(contents, "license", pkg->licenses);
+    _pt_fwrite_pkglist(contents, "depend", pkg->depends);
+    _pt_fwrite_pkglist(contents, "optdepend", pkg->optdepends);
+    _pt_fwrite_pkglist(contents, "conflict", pkg->conflicts);
+    _pt_fwrite_pkglist(contents, "replaces", pkg->replaces);
+    _pt_fwrite_pkglist(contents, "provides", pkg->provides);
+    _pt_fwrite_pkglist(contents, "backup", pkg->backup);
+    /* _pt_fwrite_pkgentry(f, "pkgbase", pkg->pkgbase); */
+    /* _pt_fwrite_pkgentry(f, "basever", pkg->basever); */
+    /* _pt_fwrite_pkgentry(f, "makedepend", pkg->makedepends); */
+    /* _pt_fwrite_pkgentry(f, "checkdepend", pkg->checkdepends); */
+    /* _pt_fwrite_pkgentry(f, "makepkgopt", pkg->makepkgopts); */
     fclose(contents);
 
     e = archive_entry_new();
@@ -633,19 +651,25 @@ int pt_install_pkg(pt_env_t *pt, pt_pkg_t *pkg) {
 }
 
 pt_db_t *pt_db_new(pt_env_t *pt, const char *dbname) {
-    pt_db_t *db = calloc(sizeof(pt_db_t), 1);
-    db->name = strdup(dbname);
-    pt->dbs = alpm_list_add(pt->dbs, db);
+    pt_db_t *db = NULL;
+#define _PT_ASSERT(x) if(!(x)) { _pt_db_free(db); return NULL; }
+    _PT_ASSERT(db = calloc(sizeof(pt_db_t), 1));
+    _PT_ASSERT(db->name = strdup(dbname));
+    _PT_ASSERT(pt->dbs = alpm_list_add(pt->dbs, db));
+#undef _PT_ASSERT
     return db;
 }
 
 pt_pkg_t *pt_pkg_new(pt_env_t *pt, const char *pkgname, const char *pkgver) {
-    pt_pkg_t *pkg = calloc(sizeof(pt_pkg_t), 1);
-    pkg->name = strdup(pkgname);
-    pkg->version = strdup(pkgver);
-    pkg->arch = strdup("any");
-    pkg->filename = pt_asprintf("%s-%s.pkg.tar", pkg->name, pkg->version);
-    pt->pkgs = alpm_list_add(pt->pkgs, pkg);
+    pt_pkg_t *pkg = NULL;
+#define _PT_ASSERT(x) if(!(x)) { _pt_pkg_free(pkg); return NULL; }
+    _PT_ASSERT(pkg = calloc(sizeof(pt_pkg_t), 1));
+    _PT_ASSERT(pkg->name = strdup(pkgname));
+    _PT_ASSERT(pkg->version = strdup(pkgver));
+    _PT_ASSERT(pkg->arch = strdup("any"));
+    _PT_ASSERT(pkg->filename = pt_asprintf("%s-%s.pkg.tar", pkgname, pkgver));
+    _PT_ASSERT(pt->pkgs = alpm_list_add(pt->pkgs, pkg));
+#undef _PT_ASSERT
     return pkg;
 }
 
@@ -707,11 +731,11 @@ int pt_fexecve(int fd, char *const argv[], char *const envp[],
 
             if(FD_ISSET(opipe[0], &readfds)) {
                 r = read(opipe[0], buf, LINE_MAX - 1);
-                if(out) { buf[r] = '\0'; fputs(buf, out); };
+                if(out && r > 0 && fwrite(buf, 1, r, out) < r) { out = NULL; };
             }
             if(FD_ISSET(epipe[0], &readfds)) {
                 r = read(epipe[0], buf, LINE_MAX - 1);
-                if(out) { buf[r] = '\0'; fputs(buf, err); };
+                if(err && r > 0 && fwrite(buf, 1, r, err) < r) { err = NULL; };
             }
 
             FD_SET(opipe[0], &readfds);
@@ -784,13 +808,34 @@ alpm_pkg_t *pt_alpm_get_pkg(alpm_handle_t *h, const char *pkgname) {
  * Tests
  *****************************************/
 
-int pt_test_file_no_exist(int dirfd, const char *path) {
-    struct stat buf;
-    return fstatat(dirfd, path, &buf, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+int pt_grep(int dd, const char *path, const char *needle) {
+    int fd;
+    char buf[LINE_MAX];
+    FILE *f;
+    if((fd = openat(dd, path, O_RDONLY)) == -1) { return 0; }
+    if((f = fdopen(fd, "r")) == NULL) { close(fd); return 0; }
+    while(fgets(buf, sizeof(buf), f)) {
+        if(strstr(buf, needle)) { fclose(f); return 1; }
+    }
+    fclose(f);
+    return 0;
 }
 
-char *pt_test_pkg_version(pt_env_t *pt, const char *pkgname) {
-    static char version[PATH_MAX];
+int pt_not_grep(int dd, const char *path, const char *needle) {
+    int fd;
+    char buf[LINE_MAX];
+    FILE *f;
+    if((fd = openat(dd, path, O_RDONLY)) == -1) { return 0; }
+    if((f = fdopen(fd, "r")) == NULL) { close(fd); return 0; }
+    while(fgets(buf, sizeof(buf), f)) {
+        if(strstr(buf, needle)) { fclose(f); return 0; }
+    }
+    fclose(f);
+    return 1;
+}
+
+char *pt_installed_pkg_version(pt_env_t *pt, const char *pkgname) {
+    static char version[NAME_MAX];
     int dd = openat(pt->dbfd, "local", O_DIRECTORY);
     DIR *dirp = fdopendir(dd);
     struct dirent entry, *result;
