@@ -6,6 +6,60 @@ pactest.c - dynamically generate environments for alpm-based tests
 
 =head1 DESCRIPTION
 
+=over
+
+=item pt_env_t *pt_new(const char *root, const char *dbpath)
+
+=back
+
+=head2 Packages
+
+=over
+
+=item pt_pkg_t *pt_pkg_new(pt_env_t *pt, const char *name, const char *ver)
+
+=item int pt_pkg_writeat(int dd, const char *path, pt_pkg_t *pkg) {
+
+=item pt_pkg_file_t *pt_pkg_add_file(pt_pkg_t *pkg, const char *path, const char *contents)
+
+=item pt_pkg_file_t *pt_pkg_add_symlink(pt_pkg_t *pkg, const char *path, const char *dest)
+
+=item pt_pkg_file_t *pt_pkg_add_dir(pt_pkg_t *pkg, const char *path)
+
+=item int pt_install_pkg(pt_env_t *pt, pt_pkg_t *pkg)
+
+=back
+
+=head2 Databases
+
+=over
+
+=item pt_db_t *pt_db_new(pt_env_t *pt, const char *dbname)
+
+=item int pt_db_add_pkg(pt_db_t *db, pt_pkg_t *pkg)
+
+=item int pt_db_writeat(int dd, const char *path, pt_db_t *db)
+
+=back
+
+=head2 File Server
+
+=over
+
+=item ptserve_t *ptserve_serve_dirat(int fd, const char *path)
+
+=item void ptserve_free(ptserve_t *ptserve)
+
+=back
+
+=head2 Utilities
+
+=over
+
+=item int pt_writeat(int dd, const char *path, const char *contents)
+
+=back
+
 =head1 EXAMPLES
 
  #include "pactest.c"

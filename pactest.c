@@ -270,6 +270,26 @@ FILE *pt_fopenat(int dirfd, const char *path, const char *mode) {
     return stream;
 }
 
+int pt_pathopen(const char *envpath, const char *prog) {
+    char *path, *p, *ctx;
+    if(envpath == NULL || (path = strdup(envpath)) == NULL) {
+        return -1;
+    }
+
+    for(p = strtok_r(path, ":", &ctx); p; p = strtok_r(NULL, ":", &ctx)) {
+        int fd = open(p, O_DIRECTORY);
+        int pfd = openat(fd, prog, O_RDONLY);
+        close(fd);
+        if(pfd >= 0) {
+            free(path);
+            return pfd;
+        }
+    }
+
+    free(path);
+    return -1;
+}
+
 /******************************************
  * environment creation
  ******************************************/
