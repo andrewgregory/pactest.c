@@ -54,8 +54,11 @@ typedef struct ptserve_t {
 	void *data;
 	int rootfd;
 	int sd_server;
-	pid_t _pid;
+#if PTSERVE_PTHREAD
 	pthread_t _tid;
+#else
+	pid_t _pid;
+#endif
 } ptserve_t;
 
 /*****************************************************************************
@@ -210,20 +213,22 @@ ptserve_t *ptserve_new() {
 	if(ptserve == NULL) { return NULL; }
 	ptserve->rootfd = AT_FDCWD;
 	ptserve->sd_server = -1;
+#if PTSERVE_PTHREAD
 	ptserve->_tid = -1;
+#else
+	ptserve->_pid = -1;
+#endif
 	return ptserve;
 }
 
 void ptserve_free(ptserve_t *ptserve) {
 	if(ptserve == NULL) { return; }
-	if(ptserve->_pid > 0) {
-		kill(ptserve->_pid, SIGTERM);
-		waitpid(ptserve->_pid, NULL, 0);
-	} else if(ptserve->_tid != -1) {
-		pthread_cancel(ptserve->_tid);
-		/* pthread_kill(ptserve->_tid, SIGINT); */
-		/* pthread_join(ptserve->_tid, NULL); */
-	}
+#if PTSERVE_PTHREAD
+	pthread_cancel(ptserve->_tid);
+#else
+	kill(ptserve->_pid, SIGTERM);
+	waitpid(ptserve->_pid, NULL, 0);
+#endif
 	free(ptserve->url);
 	free(ptserve);
 }
@@ -355,12 +360,18 @@ ptserve_t *ptserve_serve_dirat(int fd, const char *path) {
 	}
 	ptserve->response_cb = ptserve_cb_dir;
 	ptserve_listen(ptserve);
-	/* pthread_create(&ptserve->_tid, NULL, (void* (*)(void*)) ptserve_serve, ptserve); */
-	/* pthread_detach(ptserve->_tid); */
+
+#if PTSERVE_PTHREAD
+	pthread_create(&ptserve->_tid, NULL, (void* (*)(void*)) ptserve_serve, ptserve);
+	pthread_detach(ptserve->_tid);
+#else
 	ptserve->_pid = fork();
 	if(ptserve->_pid == 0) {
 		ptserve_serve(ptserve);
+		_exit(0);
 	}
+#endif
+
 	return ptserve;
 }
 
