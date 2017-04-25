@@ -379,36 +379,6 @@ ptserve_t *ptserve_serve_dir(const char *path) {
 	return ptserve_serve_dirat(AT_FDCWD, path);
 }
 
-/*****************************************************************************
- * tests
- ****************************************************************************/
-
-void ptserve_set_proxy(ptserve_t *ptserve) {
-	setenv("http_proxy", ptserve->url, 1);
-}
-#if 0
-int main(int argc, char *argv[]) {
-	ptserve_t *ptserve = ptserve_serve_cbat(AT_FDCWD, ptserve_cb_dir, NULL);
-	ptserve_listen(ptserve);
-	printf("listening on port %d\n", ptserve->port);
-	ptserve_serve(ptserve);
-	return 0;
-}
-
-int main_nocb(int argc, char *argv[]) {
-	int fd;
-	ptserve_t *ptserve = ptserve_new();
-	ptserve_listen(ptserve);
-	printf("listening on port %d\n", ptserve->port);
-	while((fd = ptserve_accept(ptserve)) >= 0) {
-		ptserve_message_t *msg = ptserve_message_new(ptserve, fd);
-		ptserve_cb_dir(msg);
-		ptserve_message_free(msg);
-	}
-	ptserve_free(ptserve);
-}
-#endif
-
 #endif /* PTSERVE_C */
 
 /* vim: set ts=2 sw=2 noet: */
