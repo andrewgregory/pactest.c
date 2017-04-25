@@ -337,7 +337,6 @@ void ptserve_cb_dir(ptserve_message_t *request) {
 ptserve_t *ptserve_serve_cbat(int fd, ptserve_response_cb_t *cb, void *data) {
 	ptserve_t *ptserve = ptserve_new();
 	if(ptserve == NULL) {
-		free(ptserve);
 		return NULL;
 	}
 	ptserve->rootfd = fd;
