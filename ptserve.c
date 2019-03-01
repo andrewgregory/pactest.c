@@ -269,6 +269,24 @@ void *ptserve_serve(ptserve_t *ptserve) {
 	return NULL;
 }
 
+int ptserve_serve_async(ptserve_t *ptserve) {
+#if PTSERVE_PTHREAD
+	return (pthread_create(&ptserve->_tid, NULL,
+				(void* (*)(void*)) ptserve_serve, ptserve) == 0
+		&& pthread_detach(ptserve->_tid) == 0) ? 0 : -1;
+# else
+	ptserve->_pid = fork();
+	if( ptserve->_pid == -1 ) {
+		return -1;
+	} else if(ptserve->_pid == 0) {
+		ptserve_serve(ptserve);
+		_exit(0);
+	} else {
+		return 0;
+	}
+# endif
+}
+
 /*****************************************************************************
  * ptserve helpers
  ****************************************************************************/
