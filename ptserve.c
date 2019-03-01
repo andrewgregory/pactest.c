@@ -321,6 +321,18 @@ void ptserve_send_range(int socket, int rootfd, const char *path, off_t start, o
 	close(fd);
 }
 
+void ptserve_send_bytes(int socket, alpm_list_t *headers,
+		const char *body, size_t bodylen) {
+	alpm_list_t *i;
+	_sendf(socket, "HTTP/1.1 200 OK\r\n");
+	_sendf(socket, "Content-Length: %zd\r\n", bodylen);
+	for(i = headers; i; i = i->next) {
+		_sendf(socket, "%s\r\n", i->data);
+	}
+	_sendf(socket, "\r\n");
+	_send(socket, body, bodylen);
+}
+
 void ptserve_send_str(int socket, const char *body) {
 	size_t blen = strlen(body);
 	_sendf(socket, "HTTP/1.1 200 OK\r\n");
