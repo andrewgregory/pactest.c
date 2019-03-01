@@ -270,6 +270,7 @@ void *ptserve_serve(ptserve_t *ptserve) {
 }
 
 int ptserve_serve_async(ptserve_t *ptserve) {
+	ptserve_listen(ptserve);
 #if PTSERVE_PTHREAD
 	return (pthread_create(&ptserve->_tid, NULL,
 				(void* (*)(void*)) ptserve_serve, ptserve) == 0
